@@ -37,7 +37,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             modules['aiohttp'].ClientTimeout = lambda **kw: None
             with patch.dict(sys.modules, modules):
                 module = importlib.import_module('astrbot_plugin_60s.main')
-                self.assertEqual(registered_commands, ['hot'])
+                self.assertEqual(registered_commands, ['hot', '60s', 'history'])
                 class SavedConfig(dict):
                     def save_config(self, replace_config):
                         import json
@@ -76,11 +76,72 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                 parts = disabled._components(Output('来源日期', b'image-data'))
                 self.assertEqual(parts[1][0], 'image')
                 self.assertNotIn('image-data', parts[0][1])
+                # Manual commands use the real adapter methods, but only fake event replies.
+                # Existing success and cooldown records must not suppress or be changed by them.
+                from astrbot_plugin_60s.core import Store
+                from test_core import daily, history
+                from dataclasses import asdict
+                disabled.store = Store(Path(directory) / 'manual-state.db')
+                disabled.store.claim('2026-11-08','other:GroupMessage:demo','daily','2026-11-08')
+                disabled.store.finish('2026-11-08','other:GroupMessage:demo','daily','sent')
+                disabled.store.save_schedule_state('daily', 9999999999, 'scheduled retry')
+                disabled.engine = types.SimpleNamespace(next_fetch={'daily':9999999999})
+                before_db = list(disabled.store.db.iterdump())
+                before_settings = asdict(disabled.settings)
+                before_config = Path(directory, 'config.json').read_bytes()
+                client = types.SimpleNamespace(fetch=AsyncMock())
+                payload = daily(); payload['data']['image']='https://mmbiz.qpic.cn/demo.png'
+                client.fetch.side_effect=lambda kind: payload if kind=='daily' else history()
+                disabled._client=lambda: client
+                disabled.manual.image_loader=AsyncMock(return_value=b'fake-image')
+                sender=types.SimpleNamespace(send_message=AsyncMock())
+                disabled.context=sender
+                caller_event=types.SimpleNamespace(
+                    chain_result=lambda parts: ('caller-only',parts),
+                    plain_result=lambda text: ('caller-only',text))
+                for _ in range(2):
+                    replies=[r async for r in disabled.daily_command(caller_event)]
+                    self.assertEqual(replies[0][0],'caller-only')
+                    self.assertEqual(replies[0][1][1][0],'image')
+                replies=[r async for r in disabled.history_command(caller_event)]
+                self.assertEqual(replies[0][0],'caller-only')
+                self.assertEqual(len(replies[0][1]),1)
+                self.assertEqual([c.args[0] for c in client.fetch.await_args_list],['daily','daily','history'])
+                self.assertEqual(disabled.manual.image_loader.await_count,2)
+                client.fetch.side_effect=TimeoutError()
+                replies=[r async for r in disabled.daily_command(caller_event,'text')]
+                self.assertIn('超时',replies[0][1])
+                self.assertEqual(client.fetch.await_count,4)
+                replies=[r async for r in disabled.history_command(caller_event,'image')]
+                self.assertIn('不支持 image',replies[0][1])
+                self.assertEqual(client.fetch.await_count,4)
+                self.assertEqual(before_db,list(disabled.store.db.iterdump()))
+                self.assertEqual(before_settings,asdict(disabled.settings))
+                self.assertEqual(before_config,Path(directory,'config.json').read_bytes())
+                self.assertEqual(disabled.engine.next_fetch,{'daily':9999999999})
+                self.assertIsNone(disabled.task)
+                self.assertFalse(disabled.settings.enabled)
+                self.assertEqual(disabled.queries,set())
+                sender.send_message.assert_not_awaited()
                 unknown_context = types.SimpleNamespace(get_platform_inst=lambda _: None, send_message=AsyncMock())
                 disabled.context = unknown_context
                 self.assertFalse(await disabled._send('unknown:GroupMessage:demo', Output('test')))
                 unknown_context.send_message.assert_not_awaited()
                 await disabled.terminate()
+                cancellable=module.WorkspacePlugin(object(), SavedConfig())
+                started=asyncio.Event();stopped=asyncio.Event()
+                async def pending_fetch(_):
+                    started.set()
+                    try:await asyncio.Event().wait()
+                    finally:stopped.set()
+                cancellable.manual.fetch=pending_fetch
+                response=asyncio.create_task(anext(cancellable.daily_command(caller_event,'text')))
+                await asyncio.wait_for(started.wait(),1)
+                await cancellable.terminate()
+                with self.assertRaises(asyncio.CancelledError):await response
+                self.assertTrue(stopped.is_set())
+                self.assertEqual(cancellable.queries,set())
+                self.assertEqual([r async for r in cancellable.daily_command(caller_event,'text')],[])
                 active = module.WorkspacePlugin(object(), SavedConfig(enabled=True, targets=['test:GroupMessage:1']))
                 await active.initialize()
                 task = active.task
