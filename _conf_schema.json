@@ -137,10 +137,10 @@
     "default": [],
     "description": "发送目标与日更格式（每个目标一条）",
     "obvious_hint": true,
-    "hint": "点击“添加条目”后，再点击菜单中的“点击这里新增一个发送目标”。在条目内选择 UMO，分别配置两个接口的格式和时间；格式选“关闭”则该目标不调度该接口。新条目默认日报图片、历史文本，09:00–11:00、间隔15分钟。删除全部条目后没有发送目标。",
+    "hint": "点击“添加条目”，再选择菜单中的“发送目标”即可新增。未选择会话时，请展开条目，在“目标会话 UMO”中选择；选择后，完整 UMO 显示在条目标题下方。分别配置两个接口的格式和时间，选“关闭”则不调度该接口。删除全部条目后没有发送目标。",
     "templates": {
       "target": {
-        "name": "点击这里新增一个发送目标",
+        "name": "发送目标",
         "display_item": "target",
         "items": {
           "target": {
@@ -148,7 +148,8 @@
             "default": "",
             "_special": "umo",
             "description": "目标会话 UMO",
-            "hint": "点击选择真实会话。虚构格式示例：example_bot:GroupMessage:demo_group_A。真实 UMO 可由 event.unified_msg_origin 获取；勿填裸群号。"
+            "hint": "未选择会话时，请点击此处选择真实 UMO。虚构格式示例：example_bot:GroupMessage:demo_group_A。真实 UMO 可由 event.unified_msg_origin 获取；勿填裸群号。标题下方显示完整标识，不代表平台群昵称。",
+            "obvious_hint": true
           },
           "daily": {
             "type": "string",
@@ -230,7 +231,9 @@
             "invisible": true,
             "description": "旧补发窗口兼容，请勿修改"
           }
-        }
+        },
+        "hint": "选择此项新增一条目标配置，然后在条目内选择 UMO。",
+        "hide_hint_in_list": true
       }
     }
   }

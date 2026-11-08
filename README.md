@@ -1,14 +1,16 @@
-# 60s 日更与热门榜单（v0.4.0）
+# 60s 日更与热门榜单（v0.4.1）
 
 每个 UMO 单独设置每天60秒、历史上的今天的格式及时间表；24 类热榜通过 `/hot` 查询。主动发送总开关默认关闭，发送目标默认空列表。未部署到生产，也没有执行真实消息投递。
 
 ## 在配置页面添加目标
 
 1. 找到“发送目标与日更格式”，点击“添加条目”。
-2. 在菜单中点击 **“点击这里新增一个发送目标”**。这是可点击菜单项，不是提示文字；该步骤由 AstrBot 内置控件决定。
+2. 在菜单中选择 **“发送目标”**，即新增一条配置；菜单提示会说明新增动作，该步骤由 AstrBot 内置控件决定。
 3. 在条目内选择目标会话 UMO；不用再填写另一份目标列表。
 4. 分别选择“每天60秒”和“历史上的今天”的格式及开始时间、等待分钟数、结束时间。
 5. 保存；确认目标和时间后，再手动打开主动发送总开关。
+
+条目主标题为“发送目标”，选择会话后，标题下方显示 `目标会话 UMO: 完整标识`。未选择时该行为空，请展开条目选择 UMO；空白会话不能保存为有效目标。主标题和添加菜单共用 AstrBot 模板 name，schema 无法把已选 UMO 改为动态主标题。display_item 只控制副标题，而且不会解析群名或好友昵称。
 
 每个 UMO 只添加一次。可在 AstrBot 会话选择器中选择已记录会话；如需手工填写，从实际事件 `event.unified_msg_origin` 获取完整标识。`example_bot:GroupMessage:demo_group_A` 只是虚构格式示例，不是可投递目标。支持 AstrBot 的 GroupMessage、FriendMessage、OtherMessage 标识，不能填裸群号或 API URL。
 
@@ -123,7 +125,7 @@ python3 -m compileall -q main.py core.py hot.py formats.py tests
 
 ## 官方配置组件验证范围
 
-用户已确认原模板菜单实际可打开，第一项容易被误认作提示；本版采用明确的动作文案，保留宿主必须的模板选择步骤。未宣称“一键新增”，没有修改 AstrBot 核心。
+用户已确认原模板菜单实际可打开，第一项容易被误认作提示；本版使用中性模板名称“发送目标”，新增操作说明只出现在添加菜单，避免已创建条目继续显示“点击新增”。保留宿主必须的模板选择步骤。未宣称“一键新增”，没有修改 AstrBot 核心。
 
 可选源码契约测试使用 AstrBot v4.29.4 原始文件：
 
@@ -137,7 +139,7 @@ python3 -m compileall -q main.py core.py hot.py formats.py tests
 python3 tests/check_upstream_config_contract.py /path/to/reference-directory
 ```
 
-实际执行官方配置类的加载、Dashboard 校验、保存、重载，以及原始模板新增函数，验证迁移数据和新条目默认值。这是源码契约测试，**不是完整 WebUI/DOM 测试**。开发机没有 AstrBot、aiohttp、npm，曾因 shell DNS 无法下载依赖；未完成真实 WebUI 点击、适配器或 API 联调，Ruff 未运行。
+实际执行官方配置类的加载、Dashboard 校验、保存、重载，以及原始模板新增函数，验证迁移数据、新条目默认值，以及未选/已选/更换 UMO 时的原始标题辅助函数。这是源码契约测试，**不是完整 WebUI/DOM 测试**。开发机没有 AstrBot、aiohttp、npm，曾因 shell DNS 无法下载依赖；未完成真实 WebUI 点击、适配器或 API 联调，Ruff 未运行。
 
 官方参考：
 

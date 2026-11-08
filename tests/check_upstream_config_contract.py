@@ -108,3 +108,25 @@ for key in ('targets','target_formats','send_time','catchup_minutes','formats','
     assert schema[key]['invisible'] is True
 assert schema['destinations']['type']=='template_list'
 print('PASS: source routes UMO/dropdowns and excludes old fields; DOM and browser interaction NOT tested')
+
+# Check actual header helpers: template name is shared with the menu, UMO is subtitle.
+script = "const props = {configPath:'destinations', templates:" + json.dumps(schema['destinations']['templates']) + "};\n" + '''
+const assert=require('node:assert/strict');
+const resolveConfigText=(path,attr,fallback)=>fallback;
+const t=()=>'';
+''' + '\n'.join(function(name) for name in (
+    'templateLabel','templatePath','templateItemPath','templateText','templateItemText',
+    'getTemplate','templateHintText','getItemMetaBySelector','templateDisplayText','getValueBySelector')) + '''
+const entry={__template_key:'target',target:''};
+assert.equal(templateLabel(entry.__template_key),'发送目标');
+assert.equal(templateDisplayText(entry),'');
+assert.equal(templateHintText(entry),'');
+assert.ok(props.templates.target.hint.includes('新增')); 
+entry.target='example_bot:GroupMessage:demo_group_A';
+assert.equal(templateDisplayText(entry),'目标会话 UMO: example_bot:GroupMessage:demo_group_A');
+entry.target='example_bot:FriendMessage:demo_user_B';
+assert.equal(templateDisplayText(entry),'目标会话 UMO: example_bot:FriendMessage:demo_user_B');
+assert.equal(templateLabel(entry.__template_key),'发送目标');
+console.log('PASS: actual header helpers show neutral title and selected raw UMO subtitle, no fabricated friendly name');
+'''
+subprocess.run(['node','-e',script],check=True)
