@@ -34,13 +34,13 @@ class ImageDateTests(unittest.IsolatedAsyncioTestCase):
     async def test_manual_old_date_is_shown(self):
         service=self.service([Response(302,headers={'Location':'https://cdn.example/2026-11-07.png'}),Response(body=b'old')])
         result=await service.query()
-        self.assertIn('2026-11-07',result.output.text);self.assertIn('非今日',result.output.text)
+        self.assertEqual(result.source,'2026-11-07');self.assertEqual(result.output.text,'')
     async def test_missing_or_invalid_filename_falls_back_to_json(self):
         for path in ('640?date=1900-01-01','2026-02-30.png'):
             service=self.service([Response(302,headers={'Location':'https://cdn.example/'+path}),Response(body=b'raw')])
             result=await service.query(expected=TODAY)
             self.json_fetch.assert_awaited_once_with();self.assertEqual(result.source,str(TODAY))
-            self.assertIn('JSON',result.output.text)
+            self.assertEqual(result.date_basis,'JSON 回退');self.assertEqual(result.output.text,'')
     async def test_direct_image_self_hosted_json_fallback(self):
         service=self.service([Response(body=b'intranet')],base='http://127.0.0.1:8080/service')
         result=await service.query(expected=TODAY)
@@ -54,7 +54,7 @@ class ImageDateTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(ApiError):await service.query(expected=expected)
             else:
                 result=await service.query();self.assertIsNone(result.source)
-                self.assertIn('日期无法确认',result.output.text)
+                self.assertEqual(result.output.text,'')
     async def test_http_errors_and_missing_location_no_fallback(self):
         for response in (Response(503),Response(302),Response(429,headers={'Retry-After':'60'})):
             service=self.service([response])
@@ -98,7 +98,7 @@ class ImageDateTests(unittest.IsolatedAsyncioTestCase):
         import tempfile
         from pathlib import Path
         from astrbot_plugin_60s.core import Engine,Store
-        from astrbot_plugin_60s.formats import daily_output
+        from astrbot_plugin_60s.formats import Output
         from test_destinations import A,B
         from test_target_schedule import entry
         entries=[entry(A),entry(B),entry('demo:GroupMessage:C')]
@@ -111,7 +111,7 @@ class ImageDateTests(unittest.IsolatedAsyncioTestCase):
             calls.append(day)
             return await ImageService(settings,session,json_fetch,clock=lambda:NOW).query(day)
         async def prepare(kind,payload,source,text,target):
-            return await daily_output(kind,payload,source,text,settings.format_for(kind,target),None)
+            return Output('上游原始文本')
         send=AsyncMock(return_value=True)
         with tempfile.TemporaryDirectory() as tmp:
             store=Store(Path(tmp)/'test.db')

@@ -2,10 +2,9 @@
 import asyncio
 import time
 from dataclasses import dataclass
-from urllib.parse import urlsplit
 
 from .core import ApiError
-from .formats import Output, check_format, structured_output
+from .formats import Output, check_format
 
 
 @dataclass(frozen=True)
@@ -47,7 +46,7 @@ LOOKUP.update({"b站": LOOKUP["bili"], "网易云": LOOKUP["ncm_list"], "百度�
 
 
 def help_text():
-    return "热榜用法：/hot 榜单 [条数1-20] [text/json/markdown]\n例如 /hot weibo 10 或 /hot weibo 10 markdown\n网易云：/hot 网易云详情 榜单ID [条数] [格式]\nHackerNews: /hot hn [top/new/best] [条数] [格式]\nIT之家: /hot IT之家 [day/week/month] [条数] [格式]\n榜单：\n" + "、".join(b.name for b in BOARDS)
+    return "热榜用法：/hot 榜单 [条数1-20] [text/json/markdown]\n例如 /hot weibo 10 或 /hot weibo 10 markdown\n网易云：/hot 网易云详情 榜单ID [条数] [格式]\nHackerNews: /hot hn [top/new/best] [条数] [格式]\nIT之家: /hot IT之家 [day/week/month] [条数] [格式]\n旧条数参数仅兼容，原始条数由 API 决定，插件不截断。\n榜单：\n" + "、".join(b.name for b in BOARDS)
 
 
 def parse_query(source, argument="", count=""):
@@ -82,79 +81,6 @@ def parse_query(source, argument="", count=""):
     return board, path, int(limit_text)
 
 
-def scalar(value, max_length=160):
-    if isinstance(value, (str, int, float)) and not isinstance(value, bool):
-        return " ".join(str(value).split())[:max_length]
-    return ""
-
-
-def first(item, names):
-    for name in names:
-        value = scalar(item.get(name))
-        if value:
-            return value
-    return ""
-
-
-def normalize(payload, board, limit):
-    if not isinstance(payload, dict) or payload.get("code") != 200:
-        raise ApiError("榜单 API 返回业务错误")
-    data = payload.get("data")
-    extra = {}
-    if isinstance(data, dict):
-        updated = first(data, ("updated", "date", "update_time"))
-        if updated:
-            extra["接口更新时间"] = updated
-        data = next((data[k] for k in ("list", "items", "tracks") if isinstance(data.get(k), list)), None)
-    if not isinstance(data, list):
-        raise ApiError("榜单返回结构不支持或内容为空")
-    rows = []
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-        title = first(item, ("title", "name", "movie_name", "programme_name", "series_name"))
-        if not title:
-            continue
-        row = {"title": title}
-        rank = scalar(item.get("rank"))
-        if rank:
-            row["原榜排名"] = rank
-        if board.key.startswith("douban"):
-            metric, label = first(item, ("rating",)), "评分"
-        elif board.key in ("maoyan_all", "maoyan_movie"):
-            metric, label = first(item, ("box_office_desc",)), "票房"
-            if not metric:
-                metric = first(item, ("box_office",)) + scalar(item.get("box_office_unit"))
-        elif board.key == "maoyan_tv":
-            metric, label = first(item, ("attention_rate_desc", "attention_rate")), "收视率"
-            row["频道"] = first(item, ("channel_name",))
-        elif board.key == "maoyan_web":
-            metric, label = first(item, ("curr_heat_desc", "curr_heat")), "热度"
-        else:
-            metric = first(item, ("hot_value", "score_desc", "score", "hot", "heat", "popularity"))
-            label = "积分" if board.key == "hn" else "热度"
-        if metric:
-            row[label] = metric
-        if board.key == "ncm_list":
-            row["榜单ID"] = scalar(item.get("id"))
-        if board.key == "ncm_detail" and isinstance(item.get("artist"), list):
-            row["歌手"] = " / ".join(scalar(a.get("name")) for a in item["artist"] if isinstance(a, dict))[:160]
-        link = item.get("link") or item.get("url")
-        if isinstance(link, str) and len(link) <= 800:
-            try:
-                parsed = urlsplit(link)
-                if parsed.scheme in ("https", "http") and parsed.hostname and not any(c.isspace() for c in link):
-                    row["link"] = link
-            except ValueError:
-                pass
-        rows.append(row)
-        if len(rows) == limit:
-            break
-    if not rows:
-        raise ApiError("榜单暂无有效条目")
-    return rows, extra
-
-
 class HotService:
     def __init__(self, fetch, timeout=20, clock=time.monotonic):
         self.fetch, self.timeout, self.clock = fetch, timeout, clock
@@ -178,7 +104,8 @@ class HotService:
         async with self.lock:
             now = self.clock()
             self.cache = {k:v for k,v in self.cache.items() if now - v[0] < 60}
-            cached = self.cache.get(path)
+            cache_key = (path, fmt)
+            cached = self.cache.get(cache_key)
             if cached:
                 payload = cached[1]
             else:
@@ -186,14 +113,13 @@ class HotService:
                     raise ApiError(f"查询过于频繁或上游限流，请 {int(self.blocked_until-now)+1} 秒后重试")
                 self.blocked_until = now + 2
                 try:
-                    payload = await asyncio.wait_for(self.fetch(path), self.timeout)
-                    normalize(payload, board, limit)
+                    payload = await asyncio.wait_for(self.fetch(path, fmt), self.timeout)
+                    if not isinstance(payload, str) or not payload.strip():
+                        raise ApiError("榜单没有返回有效文字")
                 except Exception as exc:
                     self.blocked_until = self.clock() + max(15, getattr(exc, "retry_after", 15))
                     raise ApiError("榜单暂时不可用，请稍后重试") from exc
                 if len(self.cache) >= 64:
                     self.cache.pop(next(iter(self.cache)))
-                self.cache[path] = (self.clock(), payload)
-        rows, extra = normalize(payload, board, limit)
-        extra["来源"] = board.name + " / 60s API"
-        return structured_output(board.name + "榜单", rows, fmt, extra)
+                self.cache[cache_key] = (self.clock(), payload)
+        return Output(payload)

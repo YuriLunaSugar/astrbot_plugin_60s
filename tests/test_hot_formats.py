@@ -6,8 +6,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from astrbot_plugin_60s.core import ApiError
-from astrbot_plugin_60s.formats import check_format, daily_output
-from astrbot_plugin_60s.hot import BOARDS, LOOKUP, HotService, normalize, parse_query
+from astrbot_plugin_60s.formats import check_format
+from astrbot_plugin_60s.hot import BOARDS, LOOKUP, HotService, parse_query
 from test_http import Response
 
 
@@ -29,35 +29,14 @@ class HotTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 parse_query(*args)
 
-    def test_response_shapes(self):
-        shapes = [
-            ('douyin', {'title':'热点','hot_value':0,'link':'https://example.com'}),
-            ('baidu', {'title':'话题','score_desc':'2万','url':'https://example.com'}),
-            ('douban_movie', {'title':'电影','rating':8.2,'url':'https://example.com'}),
-            ('ncm_list', {'name':'榜名','id':123}),
-            ('ncm_detail', {'title':'歌曲','artist':[None,{'name':'歌手'}]}),
-            ('maoyan_movie', {'movie_name':'电影','box_office_desc':'12万'}),
-            ('maoyan_tv', {'programme_name':'节目','attention_rate_desc':'1%','channel_name':'频道'}),
-            ('maoyan_web', {'series_name':'剧','curr_heat_desc':'1234'}),
-        ]
-        for key, item in shapes:
-            data = {'list':[None,{},item], 'updated':'真实日期'} if key.startswith('maoyan') else [None,{},item]
-            rows, _ = normalize({'code':200,'data':data}, LOOKUP[key], 5)
-            self.assertEqual(len(rows),1)
-            self.assertTrue(rows[0]['title'])
-        with self.assertRaises(ApiError):
-            normalize({'code':200,'data':None}, LOOKUP['weibo'], 5)
-
-    async def test_cache_singleflight_formats_and_limit(self):
-        fetch = AsyncMock(return_value={'code':200,'data':[{'title':f'测试{i}','hot_value':i} for i in range(30)]})
-        service = HotService(fetch)
-        results = await asyncio.gather(service.query('微博','3','json'),service.query('微博','5','json'))
+    async def test_cache_singleflight_keeps_raw_body_and_ignores_local_limit(self):
+        original='{ "code":200, "data": [1,2,3] }\n'
+        fetch=AsyncMock(return_value=original)
+        service=HotService(fetch)
+        results=await asyncio.gather(service.query('微博','3','json'),service.query('微博','5','json'))
         self.assertEqual(fetch.await_count,1)
-        self.assertEqual(len(json.loads(results[0].text)['items']),3)
-        self.assertEqual(len(json.loads(results[1].text)['items']),5)
-        help_result = await service.query('帮助')
-        self.assertIn('网易云详情',help_result.text)
-        self.assertEqual(fetch.await_count,1)
+        self.assertEqual([out.text for out in results],[original,original])
+        self.assertIn('网易云详情',(await service.query('帮助')).text)
 
     async def test_limits_timeouts_and_unsupported_image(self):
         fetch = AsyncMock(side_effect=ApiError('429',3600))
@@ -75,30 +54,17 @@ class HotTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ApiError):
                 await service.query('微博')
 
-    async def test_image_output_and_text_encodings(self):
-        loader = AsyncMock(return_value=b'valid-image')
-        payload = {'data':{'image':'https://mmbiz.qpic.cn/a'}}
-        for fmt in ('text','json','markdown'):
-            result = await daily_output('daily',payload,'2026-11-08','正文',fmt,loader)
-            self.assertIsNone(result.image)
-            if fmt == 'json':
-                self.assertEqual(json.loads(result.text)['source_date'],'2026-11-08')
-        with self.assertRaisesRegex(ApiError,'不支持 image'):
-            await daily_output('history',payload,'11-8','正文','image',loader)
     async def test_command_format_suffix_and_conflicts(self):
-        fetch=AsyncMock(return_value={'code':200,'data':[{'title':'模拟'}]})
-        service=HotService(fetch)
-        output=await service.query('微博','markdown')
-        self.assertTrue(output.text.startswith('## '))
-        output=await service.query('微博','5','json')
-        self.assertEqual(len(json.loads(output.text)['items']),1)
-        self.assertEqual(fetch.await_count,1)
+        clock=[0]
+        fetch=AsyncMock(side_effect=lambda path,fmt: '# 上游原文\n' if fmt=='markdown' else '{"code":200,"data":[1]}')
+        service=HotService(fetch,clock=lambda:clock[0])
+        self.assertEqual((await service.query('微博','markdown')).text,'# 上游原文\n')
+        clock[0]=3
+        self.assertEqual((await service.query('微博','5','json')).text,'{"code":200,"data":[1]}')
+        self.assertEqual(fetch.await_count,2)
         for args in [('微博','json','5',''),('微博','json','markdown',''),('微博','5','yaml','')]:
-            with self.assertRaises(ValueError):
-                await service.query(*args)
-        with self.assertRaisesRegex(ApiError,'不支持 image'):
-            await service.query('微博','5','image')
+            with self.assertRaises(ValueError):await service.query(*args)
+        with self.assertRaisesRegex(ApiError,'不支持 image'):await service.query('微博','5','image')
         service=HotService(fetch)
-        output=await service.query('hn','best','3','json')
-        self.assertEqual(json.loads(output.text)['title'],'HackerNews榜单')
-        self.assertEqual(fetch.await_args.args[0],'hacker-news/best')
+        await service.query('hn','best','3','json')
+        self.assertEqual(fetch.await_args.args,('hacker-news/best','json'))

@@ -63,9 +63,10 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                 replies = [item async for item in disabled.hot_command(event)]
                 self.assertIn('热榜用法', replies[0][0][1])
                 self.assertIsNone(disabled.session)
-                disabled.hot.fetch = AsyncMock(return_value={'code':200, 'data':[{'title':'模拟热点','hot_value':123}]})
+                disabled.hot.fetch = AsyncMock(side_effect=lambda path,fmt: '## 模拟热点' if fmt=='markdown' else '模拟热点')
                 replies = [item async for item in disabled.hot_command(event, '微博', '3')]
                 self.assertIn('模拟热点', replies[0][0][1])
+                disabled.hot.blocked_until=0
                 replies = [item async for item in disabled.hot_command(event, 'weibo', '10', 'markdown')]
                 self.assertTrue(replies[0][0][1].startswith('## '))
                 replies = [item async for item in disabled.hot_command(event, '微博', '3', 'image')]
@@ -74,8 +75,53 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn('未知榜单', replies[0])
                 from astrbot_plugin_60s.formats import Output
                 parts = disabled._components(Output('来源日期', b'image-data'))
-                self.assertEqual(parts[1][0], 'image')
-                self.assertNotIn('image-data', parts[0][1])
+                self.assertEqual(len(parts),1)
+                self.assertEqual(parts[0][0], 'image')
+                # Run real Engine + HttpClient + plugin preparation for every successful format.
+                from astrbot_plugin_60s.core import Engine,Settings,HttpClient,Store
+                from astrbot_plugin_60s.image_api import ImageService
+                from test_http import Response
+                from datetime import UTC,datetime
+                A='demo:GroupMessage:A';B='demo:GroupMessage:B';C='demo:GroupMessage:C';D='demo:GroupMessage:D'
+                cfg=Settings(enabled=True,destinations=[
+                    dict(target=A,daily='text',history='json'),dict(target=B,daily='markdown',history='text'),
+                    dict(target=C,daily='json',history='off'),dict(target=D,daily='image',history='off')])
+                daily_json='{ "code":200, "data":{"date":"2026-11-08","news":["news"]} }\n'
+                history_json='{ "code":200, "data":{"date":"11-8","items":[{"title":"event","year":null}]} }\n'
+                bodies={('daily','json'):daily_json,('history','json'):history_json,
+                        ('daily','text'):' 日报原始标题\n正文\n',('daily','markdown'):'# 日报原始标题\n\n**正文**\n',
+                        ('history','text'):'历史原始文字\n'}
+                requests=[]
+                def raw_get(url,**kw):
+                    requests.append((url,kw))
+                    if url=='https://cdn.example/2026-11-08.png':return Response(body=b'original-image')
+                    fmt=kw['params']['encoding'];kind='history' if url.endswith('today-in-history') else 'daily'
+                    if fmt=='image':return Response(302,headers={'Location':'https://cdn.example/2026-11-08.png'})
+                    return Response(body=bodies[kind,fmt].encode(),headers={'Content-Type':'application/json' if fmt=='json' else 'text/plain'})
+                raw_session=types.SimpleNamespace(get=raw_get)
+                raw_client=HttpClient(cfg,raw_session)
+                now=datetime(2026,11,8,1,tzinfo=UTC)
+                async def image_query(day,json_fetch):
+                    return await ImageService(cfg,raw_session,json_fetch,clock=lambda:now).query(day)
+                deliveries=AsyncMock(return_value=True)
+                raw_store=Store(Path(directory)/'raw-output.db')
+                try:
+                    with patch.object(disabled,'settings',cfg),patch.object(disabled,'_client',return_value=raw_client):
+                        engine=Engine(cfg,raw_store,raw_client,deliveries,lambda _:None,disabled._prepare,image_query=image_query)
+                        await engine.tick(now);request_count=len(requests)
+                        await engine.tick(now)
+                        self.assertEqual(len(requests),request_count)
+                        self.assertEqual(deliveries.await_count,6)
+                        actual={A:[],B:[],C:[],D:[]}
+                        for call in deliveries.await_args_list:actual[call.args[0]].append(call.args[1])
+                        self.assertCountEqual([out.text for out in actual[A]],[bodies['daily','text'],history_json])
+                        self.assertCountEqual([out.text for out in actual[B]],[bodies['daily','markdown'],bodies['history','text']])
+                        self.assertEqual(actual[C][0].text,daily_json)
+                        self.assertEqual(actual[D][0].text,'')
+                        self.assertEqual(actual[D][0].image,b'original-image')
+                        self.assertEqual(len(disabled._components(actual[D][0])),1)
+                        self.assertEqual(sum(kw.get('params')=={'encoding':'json'} for _,kw in requests),2)
+                finally:raw_store.close()
                 # Manual commands use the real adapter methods, but only fake event replies.
                 # Existing success and cooldown records must not suppress or be changed by them.
                 from astrbot_plugin_60s.core import Store
@@ -89,7 +135,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                 before_db = list(disabled.store.db.iterdump())
                 before_settings = asdict(disabled.settings)
                 before_config = Path(directory, 'config.json').read_bytes()
-                client = types.SimpleNamespace(fetch=AsyncMock())
+                client = types.SimpleNamespace(fetch=AsyncMock(),fetch_raw=AsyncMock(return_value="原始文字"))
                 payload = daily(); payload['data']['image']='https://mmbiz.qpic.cn/demo.png'
                 client.fetch.side_effect=lambda kind: payload if kind=='daily' else history()
                 disabled._client=lambda: client
@@ -103,19 +149,29 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                 for _ in range(2):
                     replies=[r async for r in disabled.daily_command(caller_event)]
                     self.assertEqual(replies[0][0],'caller-only')
-                    self.assertEqual(replies[0][1][1][0],'image')
+                    self.assertEqual(len(replies[0][1]),1)
+                    self.assertEqual(replies[0][1][0][0],'image')
                 replies=[r async for r in disabled.history_command(caller_event)]
                 self.assertEqual(replies[0][0],'caller-only')
                 self.assertEqual(len(replies[0][1]),1)
-                self.assertEqual([c.args[0] for c in client.fetch.await_args_list],['history'])
+                self.assertEqual(client.fetch.await_count,0)
+                client.fetch_raw.assert_awaited_once_with('history','text')
                 self.assertEqual(disabled.manual.image_loader.await_count,2)
-                client.fetch.side_effect=TimeoutError()
+                for command,kind in ((disabled.daily_command,'daily'),(disabled.history_command,'history')):
+                    for fmt in ('text','json','markdown'):
+                        original=f'原始 {kind} {fmt} 旧日期 2000-01-01\n'
+                        client.fetch_raw.return_value=original
+                        replies=[r async for r in command(caller_event,fmt)]
+                        self.assertEqual(replies,[('caller-only',[('text',original)])])
+                        client.fetch_raw.assert_awaited_with(kind,fmt)
+                client.fetch_raw.reset_mock()
+                client.fetch_raw.side_effect=TimeoutError()
                 replies=[r async for r in disabled.daily_command(caller_event,'text')]
                 self.assertIn('超时',replies[0][1])
-                self.assertEqual(client.fetch.await_count,2)
+                self.assertEqual(client.fetch_raw.await_count,1)
                 replies=[r async for r in disabled.history_command(caller_event,'image')]
                 self.assertIn('不支持 image',replies[0][1])
-                self.assertEqual(client.fetch.await_count,2)
+                self.assertEqual(client.fetch_raw.await_count,1)
                 self.assertEqual(before_db,list(disabled.store.db.iterdump()))
                 self.assertEqual(before_settings,asdict(disabled.settings))
                 self.assertEqual(before_config,Path(directory,'config.json').read_bytes())
@@ -131,7 +187,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                 await disabled.terminate()
                 cancellable=module.WorkspacePlugin(object(), SavedConfig())
                 started=asyncio.Event();stopped=asyncio.Event()
-                async def pending_fetch(_):
+                async def pending_fetch(*args):
                     started.set()
                     try:await asyncio.Event().wait()
                     finally:stopped.set()

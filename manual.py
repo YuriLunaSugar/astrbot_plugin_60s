@@ -1,13 +1,11 @@
 """One-shot daily queries; no scheduler, delivery store, or result cache."""
 import asyncio
-import json
 import math
-import re
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
-from .core import ApiError, render
-from .formats import Output, check_format, daily_output
+from .core import ApiError
+from .formats import Output, check_format
 
 
 class ManualService:
@@ -29,7 +27,7 @@ class ManualService:
         if fmt in ('帮助', 'help', '-h', '--help'):
             return Output(f'{command} [格式]\n可选：{allowed}；默认：{"image" if kind == "daily" else "text"}。\n'
                           '每次有效查询只回复当前会话，不改变定时记录。'
-                          '图片先请求 image，文件名无日期再请求 JSON（1 或 2 次 API 查询），随后下载图片；无法确认日期会提示。其他格式查询一次；不自动重试。'
+                          '图片先请求 image，文件名无日期再请求 JSON（1 或 2 次 API 查询），随后下载图片；成功内容不附加日期或说明。其他格式查询一次；不自动重试。'
                           '仅查询接口当前内容，不支持指定日期或其他发送目标。')
         if fmt not in ('image', 'text', 'json', 'markdown'):
             raise ApiError(f'发送格式无效，请使用 {command} [{allowed}]')
@@ -49,46 +47,12 @@ class ManualService:
                 raise
             return result.output
         try:
-            payload = await asyncio.wait_for(self.fetch(kind), self.timeout)
+            text = await asyncio.wait_for(self.fetch(kind, fmt), self.timeout)
         except ApiError as exc:
             if exc.retry_after:
                 self.api_until[kind] = self.clock().timestamp() + exc.retry_after
                 raise ApiError(f'{exc}；至少等待 {math.ceil(exc.retry_after)} 秒，本次不重试', exc.retry_after) from exc
             raise
-        if not isinstance(payload, dict) or payload.get('code') != 200 or not isinstance(payload.get('data'), dict):
-            raise ApiError('API 业务错误或数据格式无效')
-        source = payload['data'].get('date')
-        if not isinstance(source, str):
-            raise ApiError('API 缺少真实日期')
-        today = self.clock().astimezone(self.zone).date()
-        try:
-            if kind == 'daily':
-                if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', source):
-                    raise ValueError('expected YYYY-MM-DD')
-                actual = date.fromisoformat(source)
-                differs = actual != today
-            else:
-                if not re.fullmatch(r'\d{1,2}-\d{1,2}', source):
-                    raise ValueError('expected MM-DD')
-                month, day = map(int, source.split('-'))
-                actual = date(2000, month, day)  # Validate MM-DD, including February 29.
-                differs = (month, day) != (today.month, today.day)
-        except (ValueError, TypeError) as exc:
-            raise ApiError('接口返回日期无效') from exc
-        source, text = render(kind, payload, actual)
-        try:
-            output = await asyncio.wait_for(
-                daily_output(kind, payload, source, text, fmt, self.image_loader), self.timeout)
-        except ApiError as exc:
-            if fmt == 'image' and exc.retry_after:
-                self.image_until = self.clock().timestamp() + exc.retry_after
-                raise ApiError(f'{exc}；至少等待 {math.ceil(exc.retry_after)} 秒，本次不重试', exc.retry_after) from exc
-            raise
-        if differs:
-            notice = f'接口返回非今日内容：接口日期 {source}，当前日期 {today}（{self.zone.key}）。本次展示实际返回内容。'
-            if fmt == 'json':
-                doc = json.loads(output.text)
-                doc.update(current_date=str(today), notice=notice)
-                return Output(json.dumps(doc, ensure_ascii=False))
-            return Output(notice + '\n' + output.text, output.image)
-        return output
+        if not isinstance(text, str) or not text.strip():
+            raise ApiError('API 没有返回有效文字')
+        return Output(text)

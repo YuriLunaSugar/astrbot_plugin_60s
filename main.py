@@ -11,7 +11,7 @@ from astrbot.api.star import Context, Star
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .core import ApiError, Engine, HttpClient, Settings, Store, upgrade_config
-from .formats import Output, daily_output
+from .formats import Output, check_format
 from .hot import HotService
 from .manual import ManualService
 from .image_api import ImageService
@@ -37,8 +37,8 @@ class WorkspacePlugin(Star):
                                     timeout=self.settings.timeout_seconds,
                                     limit_reader=self._manual_limit)
 
-    async def _fetch_manual(self, kind):
-        return await self._client().fetch(kind)
+    async def _fetch_manual(self, kind, fmt):
+        return await self._client().fetch_raw(kind, fmt)
 
     def _manual_limit(self, kind, fmt):
         # Read only explicit server Retry-After limits, never scheduled retry/dedup.
@@ -54,11 +54,14 @@ class WorkspacePlugin(Star):
             self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.settings.timeout_seconds))
         return HttpClient(self.settings, self.session)
 
-    async def _fetch_hot(self, path):
-        return await self._client().fetch_path(path)
+    async def _fetch_hot(self, path, fmt):
+        return await self._client().fetch_raw_path(path, fmt)
 
     async def _prepare(self, kind, payload, source, text, target):
-        return await daily_output(kind, payload, source, text, self.settings.format_for(kind, target), self._load_image)
+        fmt = check_format(self.settings.format_for(kind, target))
+        if fmt == "json" and hasattr(payload, "raw_text"):
+            return Output(payload.raw_text)
+        return Output(await self._client().fetch_raw(kind, fmt))
 
     async def _load_image(self, expected=None, json_fetch=None):
         client = self._client()
@@ -84,10 +87,9 @@ class WorkspacePlugin(Star):
         from astrbot.api.message_components import Image, Plain
         if isinstance(output, str):
             output = Output(output)
-        parts = [Plain(output.text)]
         if output.image is not None:
-            parts.append(Image.fromBase64(base64.b64encode(output.image).decode("ascii")))
-        return parts
+            return [Image.fromBase64(base64.b64encode(output.image).decode("ascii"))]
+        return [Plain(output.text)]
 
     async def _send(self, target, output):
         if self.context.get_platform_inst(target.split(":", 1)[0]) is None:

@@ -304,32 +304,66 @@ def retry_delay(value, now=None):
             return 900
 
 
+class ApiPayload(dict):
+    """Parsed data for internal decisions plus the unchanged JSON response for delivery."""
+    def __init__(self, data, raw_text):
+        super().__init__(data)
+        self.raw_text = raw_text
+
+
 class HttpClient:
     def __init__(self, settings, session):
         self.settings, self.session = settings, session
 
     async def fetch(self, kind):
-        endpoint = "60s" if kind == "daily" else "today-in-history"
-        return await self.fetch_path(endpoint)
+        return await self.fetch_path("60s" if kind == "daily" else "today-in-history")
+
+    async def fetch_raw(self, kind, fmt):
+        return await self.fetch_raw_path("60s" if kind == "daily" else "today-in-history", fmt)
 
     async def fetch_path(self, endpoint):
+        raw = await self.fetch_raw_path(endpoint, "json")
+        return ApiPayload(json.loads(raw), raw)
+
+    async def fetch_raw_path(self, endpoint, fmt):
+        if fmt not in ("text", "json", "markdown"):
+            raise ApiError("文字格式必须为 text/json/markdown")
         path, _, query = endpoint.partition("?")
         params = dict(parse_qsl(query))
-        params["encoding"] = "json"
+        params["encoding"] = fmt
         async with self.session.get(f"{self.settings.base_url.rstrip('/')}/v2/{path}", params=params, allow_redirects=False) as response:
             if response.status == 429:
                 raise ApiError("HTTP 429 限流", retry_delay(response.headers.get("Retry-After")))
             if response.status != 200:
                 raise ApiError(f"HTTP {response.status}")
+            mime = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+            allowed = ("application/json", "text/json", "", "text/plain") if fmt == "json" else ("text/plain", "text/markdown", "text/x-markdown", "application/json")
+            if mime not in allowed:
+                raise ApiError("接口没有返回所请求的文字格式，不能作为文字发送")
             raw = bytearray()
             async for chunk in response.content.iter_chunked(65536):
                 raw.extend(chunk)
                 if len(raw) > 1_000_000:
-                    raise ApiError("响应超过 1MB")
+                    raise ApiError("响应超过 1MB，停止发送（不截断原文）")
             try:
-                return json.loads(raw)
-            except (ValueError, UnicodeError) as exc:
-                raise ApiError("响应不是有效 JSON") from exc
+                text = raw.decode("utf-8")
+            except UnicodeError as exc:
+                raise ApiError("响应不是有效 UTF-8 文字") from exc
+            if not text.strip():
+                raise ApiError("接口返回空文字")
+            if fmt == "json" or mime == "application/json" or text.lstrip().startswith("{"):
+                try:
+                    data = json.loads(text)
+                except ValueError as exc:
+                    if fmt == "json" or mime == "application/json":
+                        raise ApiError("响应不是有效 JSON") from exc
+                else:
+                    if fmt == "json" or mime == "application/json" or (isinstance(data, dict) and "code" in data):
+                        if not isinstance(data, dict) or data.get("code") != 200:
+                            raise ApiError("API 返回业务错误")
+                        if fmt != "json":
+                            raise ApiError("API 返回 JSON 而非所请求的文字格式")
+            return text
 
 
 class Engine:

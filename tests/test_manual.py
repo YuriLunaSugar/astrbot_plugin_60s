@@ -13,7 +13,7 @@ from astrbot_plugin_60s.formats import Output
 class ManualTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.now=datetime(2026,11,8,1,tzinfo=UTC)
-        self.fetch=AsyncMock(side_effect=lambda k: daily() if k=='daily' else history())
+        self.fetch=AsyncMock(side_effect=lambda kind,fmt: '原文 2026-11-08' if kind=='daily' else '历史原文 11-8')
         self.image=AsyncMock(return_value=ImageResult('2026-11-08',Output('模拟图片日期',b'fake-safe-image')))
         self.service=ManualService(self.fetch,self.image,timezone='Asia/Shanghai',clock=lambda:self.now)
 
@@ -26,7 +26,7 @@ class ManualTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_default_formats(self):
         payload=daily();payload['data']['image']='https://mmbiz.qpic.cn/demo.png'
-        self.fetch.side_effect=lambda k:payload if k=='daily' else history()
+        self.fetch.side_effect=lambda kind,fmt: '原文' if kind=='daily' else '历史原文 11-8'
         result=await self.service.query('daily')
         self.assertEqual(result.image,b'fake-safe-image')
         self.assertEqual(self.fetch.await_count,0)
@@ -37,20 +37,20 @@ class ManualTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.fetch.await_count,1)
 
     async def test_stale_json_keeps_actual_date_and_valid_json(self):
-        self.fetch.side_effect=lambda _:daily('2026-11-07')
+        original=json.dumps(daily('2026-11-07'),ensure_ascii=False,indent=2)+'\n'
+        self.fetch.side_effect=lambda *args:original
         result=await self.service.query('daily','json')
         doc=json.loads(result.text)
-        self.assertEqual(doc['source_date'],'2026-11-07')
-        self.assertEqual(doc['current_date'],'2026-11-08')
-        self.assertIn('非今日',doc['notice'])
+        self.assertEqual(doc['data']['date'],'2026-11-07')
+        self.assertEqual(result.text,original)
         self.assertEqual(self.fetch.await_count,1)
 
     async def test_history_different_date_and_leap_day_are_labeled(self):
         payload=history();payload['data']['date']='2-29'
-        self.fetch.side_effect=lambda _:payload
+        self.fetch.side_effect=lambda *args:'# 历史原文 2-29\n'
         result=await self.service.query('history','markdown')
         self.assertIn('2-29',result.text)
-        self.assertIn('非今日',result.text)
+        self.assertEqual(result.text,'# 历史原文 2-29\n')
         self.assertEqual(self.fetch.await_count,1)
 
     async def test_help_and_invalid_format_do_not_fetch(self):
@@ -65,10 +65,10 @@ class ManualTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ApiError,'900'):await self.service.query('daily','text')
         with self.assertRaisesRegex(ApiError,'限流'):await self.service.query('daily','text')
         self.assertEqual(self.fetch.await_count,1)
-        self.fetch.side_effect=lambda _:history()
+        self.fetch.side_effect=lambda *args:'历史原文'
         await self.service.query('history')
         self.now+=timedelta(seconds=900)
-        self.fetch.side_effect=lambda _:daily()
+        self.fetch.side_effect=lambda *args:'日报原文'
         await self.service.query('daily','text')
         self.assertEqual(self.fetch.await_count,3)
 
@@ -76,26 +76,21 @@ class ManualTests(unittest.IsolatedAsyncioTestCase):
         self.fetch.side_effect=OSError('network')
         with self.assertRaises(OSError):await self.service.query('daily','text')
         self.assertEqual(self.fetch.await_count,1)
-        self.fetch.side_effect=lambda _:daily()
+        self.fetch.side_effect=lambda *args:'日报原文'
         result=await self.service.query('daily')
         self.assertEqual(result.image,b'fake-safe-image')
         self.assertEqual(self.fetch.await_count,1)
         self.image.assert_awaited_once_with()
 
-    async def test_bad_dates_and_empty_content_rejected_once(self):
-        for kind,payload in [('daily',daily('not-a-date')),('history',history())]:
-            if kind=='history':payload['data']['date']='2-30'
-            self.fetch.side_effect=lambda _,p=payload:p
-            with self.assertRaises(ApiError):await self.service.query(kind,'text')
-        self.assertEqual(self.fetch.await_count,2)
-        payload=history();payload['data']['items']=[]
-        self.fetch.side_effect=lambda _:payload
-        with self.assertRaises(ApiError):await self.service.query('history')
-        self.assertEqual(self.fetch.await_count,3)
+    async def test_empty_or_nontext_success_value_rejected_once(self):
+        for payload in ('', '  ', b'not text', {'data':'not raw'}):
+            self.fetch.side_effect=lambda *args,p=payload:p
+            with self.assertRaises(ApiError):await self.service.query('daily','text')
+        self.assertEqual(self.fetch.await_count,4)
 
     async def test_image_failure_no_text_fallback_or_extra_api_request(self):
         payload=daily();payload['data']['image']='https://mmbiz.qpic.cn/demo.png'
-        self.fetch.side_effect=lambda _:payload
+        self.fetch.side_effect=lambda *args:'# 历史原文 2-29\n'
         self.image.side_effect=ApiError('图片 HTTP 429',900)
         with self.assertRaisesRegex(ApiError,'900'):await self.service.query('daily')
         with self.assertRaisesRegex(ApiError,'限流'):await self.service.query('daily')
@@ -115,7 +110,7 @@ class ManualTests(unittest.IsolatedAsyncioTestCase):
     async def test_timeout_and_cancellation_stop_without_retry(self):
         import asyncio
         started=asyncio.Event();stopped=asyncio.Event()
-        async def waiting(_):
+        async def waiting(*args):
             started.set()
             try:await asyncio.Event().wait()
             finally:stopped.set()
@@ -155,11 +150,8 @@ class ManualTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(self.service.query('daily','text'),self.service.query('daily','text'))
         self.assertEqual(self.fetch.await_count,2)
 
-    async def test_timezone_and_strict_date_shape(self):
-        self.now=datetime(2026,11,7,17,tzinfo=UTC) # Already Nov 8 in configured Asia/Shanghai.
-        result=await self.service.query('daily','text')
-        self.assertNotIn('非今日',result.text)
-        for source in ('0002-29','2-030','2-29-extra'):
-            payload=history();payload['data']['date']=source
-            self.fetch.side_effect=lambda _,p=payload:p
-            with self.assertRaisesRegex(ApiError,'日期无效'):await self.service.query('history')
+    async def test_timezone_does_not_add_a_manual_date_notice(self):
+        self.now=datetime(2026,11,7,17,tzinfo=UTC)
+        original='上游旧日原文 2000-01-01\n'
+        self.fetch.side_effect=lambda *args:original
+        self.assertEqual((await self.service.query('daily','text')).text,original)

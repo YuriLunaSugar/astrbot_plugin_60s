@@ -31,6 +31,7 @@ def filename_date(url):
 class ImageResult:
     source: str | None
     output: Output
+    date_basis: str = ""
 
 
 class ImageService:
@@ -89,13 +90,4 @@ class ImageService:
                 if final_date is not None and final_date != source:
                     source, basis = final_date, '最终图片文件名'
         self.check_date(source, expected)
-        today = self.clock().astimezone(ZoneInfo(self.settings.timezone)).date().isoformat()
-        if source is None:
-            notice = '日期无法确认，不能视为今日日报。'
-        else:
-            notice = f'日期：{source}（{basis}）'
-            if source != today:
-                notice += f'；非今日内容，当前日期 {today}。'
-        if basis == 'JSON 回退':
-            notice += '\nJSON 与图片非原子读取，不能确认图片内容日期一致。'
-        return ImageResult(source, Output('每天60秒读懂世界｜' + notice + '\n来源：60s API / 原日报发布方', raw))
+        return ImageResult(source, Output("", raw), basis)
