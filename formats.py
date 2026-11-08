@@ -3,7 +3,7 @@ import json
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-from .core import ApiError
+from .core import ApiError, retry_delay
 
 
 @dataclass(frozen=True)
@@ -64,6 +64,8 @@ async def load_image(session, url, allowed_hosts):
     if parsed.scheme != "https" or parsed.hostname not in allowed_hosts or parsed.username or parsed.port not in (None, 443):
         raise ApiError("日报图片地址不在允许的 HTTPS 图片域名列表中")
     async with session.get(url, allow_redirects=False) as response:
+        if response.status == 429:
+            raise ApiError("图片 HTTP 429 限流", retry_delay(response.headers.get("Retry-After")))
         if response.status != 200:
             raise ApiError(f"图片 HTTP {response.status}")
         mime = response.headers.get("Content-Type", "").split(";")[0].lower()

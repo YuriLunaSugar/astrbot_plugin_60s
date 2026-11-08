@@ -17,7 +17,7 @@
   "send_time": {
     "type": "string",
     "default": "09:00",
-    "description": "每天发送时间 HH:MM"
+    "description": "旧配置兼容：没有单独开始时间时使用"
   },
   "targets": {
     "type": "list",
@@ -37,7 +37,7 @@
   "catchup_minutes": {
     "type": "int",
     "default": 120,
-    "description": "当天错过计划后允许补发的分钟数，1–1440，不跨日补发"
+    "description": "旧配置兼容：没有单独结束时间时的补发窗口，结束边界不含且不跨日"
   },
   "timeout_seconds": {
     "type": "int",
@@ -45,271 +45,14 @@
     "description": "HTTP 和单次发送超时秒数，1–120"
   },
   "formats": {
-    "type": "object",
-    "description": "各接口发送格式（API 始终取 JSON，插件按选项发送）",
-    "items": {
-      "daily": {
-        "type": "string",
-        "description": "每天60秒发送格式",
-        "default": "text",
-        "options": [
-          "text",
-          "json",
-          "markdown",
-          "image"
-        ]
-      },
-      "history": {
-        "type": "string",
-        "description": "历史上的今天发送格式",
-        "default": "text",
-        "options": [
-          "text",
-          "json",
-          "markdown"
-        ]
-      },
-      "douyin": {
-        "type": "string",
-        "description": "抖音发送格式",
-        "default": "text",
-        "options": [
-          "text",
-          "json",
-          "markdown"
-        ]
-      },
-      "ithome": {
-        "type": "string",
-        "description": "IT之家发送格式",
-        "default": "text",
-        "options": [
-          "text",
-          "json",
-          "markdown"
-        ]
-      },
-      "rednote": {
-        "type": "string",
-        "description": "小红书发送格式",
-        "default": "text",
-        "options": [
-          "text",
-          "json",
-          "markdown"
-        ]
-      },
-      "bili": {
-        "type": "string",
-        "description": "哔哩哔哩发送格式",
-        "default": "text",
-        "options": [
-          "text",
-          "json",
-          "markdown"
-        ]
-      },
-      "weibo": {
-        "type": "string",
-        "description": "微博发送格式",
-        "default": "text",
-        "options": [
-          "text",
-          "json",
-          "markdown"
-        ]
-      },
-      "quark": {
-        "type": "string",
-        "description": "夸克发送格式",
-        "default": "text",
-        "options": [
-          "text",
-          "json",
-          "markdown"
-        ]
-      },
-      "baidu": {
-        "type": "string",
-        "description": "百度发送格式",
-        "default": "text",
-        "options": [
-          "text",
-          "json",
-          "markdown"
-        ]
-      },
-      "baidu_tv": {
-        "type": "string",
-        "description": "百度电视剧发送格式",
-        "default": "text",
-        "options": [
-          "text",
-          "json",
-          "markdown"
-        ]
-      },
-      "tieba": {
-        "type": "string",
-        "description": "贴吧发送格式",
-        "default": "text",
-        "options": [
-          "text",
-          "json",
-          "markdown"
-        ]
-      },
-      "toutiao": {
-        "type": "string",
-        "description": "头条发送格式",
-        "default": "text",
-        "options": [
-          "text",
-          "json",
-          "markdown"
-        ]
-      },
-      "zhihu": {
-        "type": "string",
-        "description": "知乎发送格式",
-        "default": "text",
-        "options": [
-          "text",
-          "json",
-          "markdown"
-        ]
-      },
-      "dongchedi": {
-        "type": "string",
-        "description": "懂车帝发送格式",
-        "default": "text",
-        "options": [
-          "text",
-          "json",
-          "markdown"
-        ]
-      },
-      "ncm_list": {
-        "type": "string",
-        "description": "网易云榜单发送格式",
-        "default": "text",
-        "options": [
-          "text",
-          "json",
-          "markdown"
-        ]
-      },
-      "ncm_detail": {
-        "type": "string",
-        "description": "网易云详情发送格式",
-        "default": "text",
-        "options": [
-          "text",
-          "json",
-          "markdown"
-        ]
-      },
-      "hn": {
-        "type": "string",
-        "description": "HackerNews发送格式",
-        "default": "text",
-        "options": [
-          "text",
-          "json",
-          "markdown"
-        ]
-      },
-      "maoyan_all": {
-        "type": "string",
-        "description": "猫眼总票房发送格式",
-        "default": "text",
-        "options": [
-          "text",
-          "json",
-          "markdown"
-        ]
-      },
-      "maoyan_movie": {
-        "type": "string",
-        "description": "猫眼电影发送格式",
-        "default": "text",
-        "options": [
-          "text",
-          "json",
-          "markdown"
-        ]
-      },
-      "maoyan_tv": {
-        "type": "string",
-        "description": "猫眼电视发送格式",
-        "default": "text",
-        "options": [
-          "text",
-          "json",
-          "markdown"
-        ]
-      },
-      "maoyan_web": {
-        "type": "string",
-        "description": "猫眼网剧发送格式",
-        "default": "text",
-        "options": [
-          "text",
-          "json",
-          "markdown"
-        ]
-      },
-      "douban_movie": {
-        "type": "string",
-        "description": "豆瓣电影发送格式",
-        "default": "text",
-        "options": [
-          "text",
-          "json",
-          "markdown"
-        ]
-      },
-      "douban_tv_cn": {
-        "type": "string",
-        "description": "豆瓣华语剧发送格式",
-        "default": "text",
-        "options": [
-          "text",
-          "json",
-          "markdown"
-        ]
-      },
-      "douban_tv_global": {
-        "type": "string",
-        "description": "豆瓣全球剧发送格式",
-        "default": "text",
-        "options": [
-          "text",
-          "json",
-          "markdown"
-        ]
-      },
-      "douban_show_cn": {
-        "type": "string",
-        "description": "豆瓣华语综艺发送格式",
-        "default": "text",
-        "options": [
-          "text",
-          "json",
-          "markdown"
-        ]
-      },
-      "douban_show_global": {
-        "type": "string",
-        "description": "豆瓣全球综艺发送格式",
-        "default": "text",
-        "options": [
-          "text",
-          "json",
-          "markdown"
-        ]
-      }
-    }
+    "type": "dict",
+    "items": {},
+    "default": {
+      "daily": "text",
+      "history": "text"
+    },
+    "invisible": true,
+    "description": "旧版日更默认格式兼容；旧热榜格式保留但不再使用"
   },
   "image_hosts": {
     "type": "list",
@@ -317,5 +60,95 @@
       "mmbiz.qpic.cn"
     ],
     "description": "日报图片允许的 HTTPS 域名（精确匹配，不允许重定向）"
+  },
+  "target_formats": {
+    "type": "template_list",
+    "default": [],
+    "description": "按目标设置两个日更接口的格式（目标必须先在 targets 中启用）",
+    "templates": {
+      "target": {
+        "name": "目标日更格式",
+        "display_item": "target",
+        "items": {
+          "target": {
+            "type": "string",
+            "default": "",
+            "description": "完整目标会话标识",
+            "_special": "umo"
+          },
+          "daily": {
+            "type": "string",
+            "default": "",
+            "description": "每天60秒格式；留空继承旧默认",
+            "options": [
+              "",
+              "text",
+              "json",
+              "markdown",
+              "image"
+            ]
+          },
+          "history": {
+            "type": "string",
+            "default": "",
+            "description": "历史上的今天格式；留空继承旧默认",
+            "options": [
+              "",
+              "text",
+              "json",
+              "markdown"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "schedules": {
+    "type": "object",
+    "description": "两个日更接口独立调度",
+    "items": {
+      "daily": {
+        "type": "object",
+        "description": "每天60秒",
+        "items": {
+          "send_time": {
+            "type": "string",
+            "default": "",
+            "description": "每天发送时间 HH:MM；留空继承旧 send_time"
+          },
+          "retry_minutes": {
+            "type": "int",
+            "default": 15,
+            "description": "等待重试分钟数，1–1440"
+          },
+          "end_time": {
+            "type": "string",
+            "default": "",
+            "description": "最后结束时间 HH:MM（含该时刻）；早于开始表示跨午夜；留空沿用旧补发窗口"
+          }
+        }
+      },
+      "history": {
+        "type": "object",
+        "description": "历史上的今天",
+        "items": {
+          "send_time": {
+            "type": "string",
+            "default": "",
+            "description": "每天发送时间 HH:MM；留空继承旧 send_time"
+          },
+          "retry_minutes": {
+            "type": "int",
+            "default": 15,
+            "description": "等待重试分钟数，1–1440"
+          },
+          "end_time": {
+            "type": "string",
+            "default": "",
+            "description": "最后结束时间 HH:MM（含该时刻）；早于开始表示跨午夜；留空沿用旧补发窗口"
+          }
+        }
+      }
+    }
   }
 }

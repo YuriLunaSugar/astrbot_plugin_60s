@@ -43,21 +43,21 @@ BOARDS = [
     Board("douban_show_global", "豆瓣全球综艺", "douban/weekly/show_global", "421330297e0"),
 ]
 LOOKUP = {alias.lower(): board for board in BOARDS for alias in (board.key, board.name)}
-LOOKUP.update({"b站": LOOKUP["bili"], "网易云": LOOKUP["ncm_list"], "百度贴吧": LOOKUP["tieba"]})
+LOOKUP.update({"b站": LOOKUP["bili"], "网易云": LOOKUP["ncm_list"], "百度贴吧": LOOKUP["tieba"], "bilibili": LOOKUP["bili"], "xiaohongshu": LOOKUP["rednote"], "netease": LOOKUP["ncm_list"], "netease-detail": LOOKUP["ncm_detail"]})
 
 
 def help_text():
-    return "热榜用法：/热榜 榜单 [条数1-20]\n例如 /热榜 微博 5\n网易云：/热榜 网易云详情 榜单ID [条数]\nHackerNews: /热榜 hn [top/new/best] [条数]\nIT之家: /热榜 IT之家 [day/week/month] [条数]\n榜单：\n" + "、".join(b.name for b in BOARDS)
+    return "热榜用法：/hot 榜单 [条数1-20] [text/json/markdown]\n例如 /hot weibo 10 或 /hot weibo 10 markdown\n网易云：/hot 网易云详情 榜单ID [条数] [格式]\nHackerNews: /hot hn [top/new/best] [条数] [格式]\nIT之家: /hot IT之家 [day/week/month] [条数] [格式]\n榜单：\n" + "、".join(b.name for b in BOARDS)
 
 
 def parse_query(source, argument="", count=""):
     board = LOOKUP.get(source.lower())
     if board is None:
-        raise ValueError("未知榜单，请发送 /热榜 帮助")
+        raise ValueError("未知榜单，请发送 /hot 帮助")
     path = board.path
     if board.key == "ncm_detail":
         if not argument.isascii() or not argument.isdigit() or not 1 <= len(argument) <= 20 or int(argument) <= 0:
-            raise ValueError("请先用 /热榜 网易云榜单 获取ID，再用 /热榜 网易云详情 ID [条数]")
+            raise ValueError("请先用 /hot 网易云榜单 获取ID，再用 /hot 网易云详情 ID [条数]")
         path = path.replace("{id}", argument)
         limit_text = count or "10"
     elif board.key in ("hn", "ithome"):
@@ -75,7 +75,7 @@ def parse_query(source, argument="", count=""):
         path = "hacker-news/" + variant if board.key == "hn" else "it-news/rank?type=" + variant
     else:
         if count:
-            raise ValueError("参数过多，用法：/热榜 榜单 [条数]")
+            raise ValueError("参数过多，用法：/hot 榜单 [条数]")
         limit_text = argument or "10"
     if not limit_text.isascii() or not limit_text.isdigit() or not 1 <= int(limit_text) <= 20:
         raise ValueError("条数必须为 1–20 的整数")
@@ -156,17 +156,24 @@ def normalize(payload, board, limit):
 
 
 class HotService:
-    def __init__(self, fetch, formats=None, timeout=20, clock=time.monotonic):
-        self.fetch, self.formats, self.timeout, self.clock = fetch, formats or {}, timeout, clock
+    def __init__(self, fetch, timeout=20, clock=time.monotonic):
+        self.fetch, self.timeout, self.clock = fetch, timeout, clock
         self.cache = {}
         self.lock = asyncio.Lock()
         self.blocked_until = 0
 
-    async def query(self, source, argument="", count=""):
+    async def query(self, source, argument="", count="", output_format=""):
         if source in ("帮助", "help", "列表", ""):
             return Output(help_text())
-        board, path, limit = parse_query(source, argument, count)
-        fmt = check_format(self.formats.get(board.key, "text"))
+        tokens = [token for token in (argument, count, output_format) if token]
+        fmt = "text"
+        if tokens and tokens[-1] in ("text", "json", "markdown", "image"):
+            fmt = check_format(tokens.pop())
+        if any(token in ("text", "json", "markdown", "image") for token in tokens):
+            raise ValueError("格式只能在命令末尾出现一次")
+        if len(tokens) > 2:
+            raise ValueError("参数过多或格式无效，请使用 /hot 帮助")
+        board, path, limit = parse_query(source, *(tokens + [""] * (2-len(tokens))))
         # Single-flight across command requests; cached successes bypass API cooldown.
         async with self.lock:
             now = self.clock()

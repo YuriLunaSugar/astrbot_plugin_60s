@@ -24,7 +24,11 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             modules['astrbot.api.message_components'].Plain = lambda text: ('text', text)
             modules['astrbot.api.message_components'].Image = types.SimpleNamespace(fromBase64=lambda value: ('image', value))
             modules['astrbot.api.event'].AstrMessageEvent = object
-            modules['astrbot.api.event'].filter = types.SimpleNamespace(command=lambda *a, **k: lambda f: f)
+            registered_commands = []
+            def command(name):
+                registered_commands.append(name)
+                return lambda function: function
+            modules['astrbot.api.event'].filter = types.SimpleNamespace(command=command)
             modules['astrbot.api.star'].Star = Star
             modules['astrbot.api.star'].Context = object
             modules['astrbot.core.utils.astrbot_path'].get_astrbot_data_path = lambda: directory
@@ -33,6 +37,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             modules['aiohttp'].ClientTimeout = lambda **kw: None
             with patch.dict(sys.modules, modules):
                 module = importlib.import_module('astrbot_plugin_60s.main')
+                self.assertEqual(registered_commands, ['hot'])
                 disabled = module.WorkspacePlugin(object(), {})
                 await disabled.initialize()
                 self.assertIsNone(disabled.task)
@@ -43,6 +48,10 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                 disabled.hot.fetch = AsyncMock(return_value={'code':200, 'data':[{'title':'模拟热点','hot_value':123}]})
                 replies = [item async for item in disabled.hot_command(event, '微博', '3')]
                 self.assertIn('模拟热点', replies[0][0][1])
+                replies = [item async for item in disabled.hot_command(event, 'weibo', '10', 'markdown')]
+                self.assertTrue(replies[0][0][1].startswith('## '))
+                replies = [item async for item in disabled.hot_command(event, '微博', '3', 'image')]
+                self.assertIn('不支持 image', replies[0])
                 replies = [item async for item in disabled.hot_command(event, '未知')]
                 self.assertIn('未知榜单', replies[0])
                 from astrbot_plugin_60s.formats import Output

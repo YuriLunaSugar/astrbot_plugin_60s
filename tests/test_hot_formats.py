@@ -14,6 +14,9 @@ from test_http import Response
 class HotTests(unittest.IsolatedAsyncioTestCase):
     def test_routes_and_arguments(self):
         self.assertEqual(len(BOARDS), 24)
+        self.assertEqual(parse_query('weibo', '10')[2], 10)
+        self.assertEqual(parse_query('bilibili')[0].key, 'bili')
+        self.assertEqual(parse_query('xiaohongshu')[0].key, 'rednote')
         for board in BOARDS:
             args = ('12345', '5') if board.key == 'ncm_detail' else ('5', '')
             b, path, limit = parse_query(board.name, *args)
@@ -47,8 +50,8 @@ class HotTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cache_singleflight_formats_and_limit(self):
         fetch = AsyncMock(return_value={'code':200,'data':[{'title':f'测试{i}','hot_value':i} for i in range(30)]})
-        service = HotService(fetch, {'weibo':'json'})
-        results = await asyncio.gather(service.query('微博','3'),service.query('微博','5'))
+        service = HotService(fetch)
+        results = await asyncio.gather(service.query('微博','3','json'),service.query('微博','5','json'))
         self.assertEqual(fetch.await_count,1)
         self.assertEqual(len(json.loads(results[0].text)['items']),3)
         self.assertEqual(len(json.loads(results[1].text)['items']),5)
@@ -63,9 +66,9 @@ class HotTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ApiError):
                 await service.query('微博')
         self.assertEqual(fetch.await_count,1)
-        service = HotService(fetch, {'weibo':'image'})
+        service = HotService(fetch)
         with self.assertRaisesRegex(ApiError,'不支持 image'):
-            await service.query('微博')
+            await service.query('微博','image')
         self.assertEqual(fetch.await_count,1)
         for failure in (TimeoutError(),ValueError()):
             service = HotService(AsyncMock(side_effect=failure))
@@ -99,3 +102,21 @@ class HotTests(unittest.IsolatedAsyncioTestCase):
                 await load_image(session,'https://mmbiz.qpic.cn/a',['mmbiz.qpic.cn'])
         with self.assertRaises(ApiError):
             await load_image(session,'http://127.0.0.1/a',['mmbiz.qpic.cn'])
+
+    async def test_command_format_suffix_and_conflicts(self):
+        fetch=AsyncMock(return_value={'code':200,'data':[{'title':'模拟'}]})
+        service=HotService(fetch)
+        output=await service.query('微博','markdown')
+        self.assertTrue(output.text.startswith('## '))
+        output=await service.query('微博','5','json')
+        self.assertEqual(len(json.loads(output.text)['items']),1)
+        self.assertEqual(fetch.await_count,1)
+        for args in [('微博','json','5',''),('微博','json','markdown',''),('微博','5','yaml','')]:
+            with self.assertRaises(ValueError):
+                await service.query(*args)
+        with self.assertRaisesRegex(ApiError,'不支持 image'):
+            await service.query('微博','5','image')
+        service=HotService(fetch)
+        output=await service.query('hn','best','3','json')
+        self.assertEqual(json.loads(output.text)['title'],'HackerNews榜单')
+        self.assertEqual(fetch.await_args.args[0],'hacker-news/best')

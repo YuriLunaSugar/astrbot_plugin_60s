@@ -4,20 +4,22 @@ import json
 import re
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from urllib.parse import parse_qsl, urlsplit
 from zoneinfo import ZoneInfo
 
 
 class ApiError(Exception):
-    def __init__(self, message, retry_after=900):
+    def __init__(self, message, retry_after=0):
         super().__init__(message)
         self.retry_after = retry_after
 
 
 @dataclass
 class Settings:
+    schedules: dict = field(default_factory=dict)
+    target_formats: dict | list = field(default_factory=list)
     formats: dict = field(default_factory=dict)
     image_hosts: list = field(default_factory=lambda: ["mmbiz.qpic.cn"])
     enabled: bool = False
@@ -49,6 +51,74 @@ class Settings:
         if not isinstance(self.targets, (list, tuple)) or any(not isinstance(t, str) or len(t.split(":", 2)) != 3 or not all(t.split(":", 2)) for t in self.targets):
             raise ValueError("targets 必须为完整 unified_msg_origin 字符串列表")
         self.targets = tuple(dict.fromkeys(self.targets))
+        if isinstance(self.target_formats, list):
+            mappings = {}
+            for entry in self.target_formats:
+                if not isinstance(entry, dict) or not isinstance(entry.get("target"), str):
+                    raise ValueError("目标格式条目必须包含 target")
+                target = entry["target"]
+                if target in mappings:
+                    raise ValueError("同一目标不能重复配置格式")
+                if set(entry) - {"target", "daily", "history", "__template_key"}:
+                    raise ValueError("目标格式条目只允许两个日更接口")
+                mappings[target] = {k: entry[k] for k in ("daily", "history") if entry.get(k)}
+            self.target_formats = mappings
+        if not isinstance(self.target_formats, dict):
+            raise ValueError("target_formats 必须为目标会话到日更格式的映射")
+        for target, mapping in self.target_formats.items():
+            if target not in self.targets or not isinstance(mapping, dict):
+                raise ValueError("target_formats 中的目标必须存在于 targets，值必须是对象")
+            if set(mapping) - {"daily", "history"}:
+                raise ValueError("目标格式仅支持 daily/history")
+            for kind, fmt in mapping.items():
+                allowed = ("text", "json", "markdown", "image") if kind == "daily" else ("text", "json", "markdown")
+                if fmt not in allowed:
+                    raise ValueError(f"{kind} 不支持发送格式 {fmt}")
+        if not isinstance(self.schedules, dict) or set(self.schedules) - {"daily", "history"}:
+            raise ValueError("schedules 仅支持 daily/history")
+        for kind, schedule in self.schedules.items():
+            if not isinstance(schedule, dict):
+                raise ValueError("每个接口的调度必须为对象")
+            for key in ("send_time", "end_time"):
+                value = schedule.get(key, "")
+                if value and (not isinstance(value, str) or not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value)):
+                    raise ValueError(f"{kind}.{key} 必须为 HH:MM")
+            wait = schedule.get("retry_minutes", 15)
+            if type(wait) is not int or not 1 <= wait <= 1440:
+                raise ValueError("retry_minutes 必须为 1–1440 的整数分钟")
+            if schedule.get("end_time") == (schedule.get("send_time") or self.send_time):
+                raise ValueError("接口结束时间不能与开始时间相同")
+
+    def format_for(self, kind, target):
+        return self.target_formats.get(target, {}).get(kind, self.formats.get(kind, "text"))
+
+    def retry_seconds(self, kind):
+        return self.schedules.get(kind, {}).get("retry_minutes", 15) * 60
+
+    def window(self, kind, now):
+        """Return schedule-day and inclusive end; old configs retain old boundaries."""
+        local = now.astimezone(self.zone)
+        schedule = self.schedules.get(kind, {})
+        start = schedule.get("send_time") or self.send_time
+        end = schedule.get("end_time")
+        hour, minute = map(int, start.split(":"))
+        if not end:
+            # Compatibility: original catchup window stops at midnight and excludes end.
+            begin = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            midnight = datetime.combine(local.date() + timedelta(days=1), datetime.min.time(), self.zone)
+            deadline = min(begin.timestamp() + self.catchup_minutes * 60, midnight.timestamp())
+            if begin.timestamp() <= now.timestamp() < deadline:
+                return local.date(), deadline - 0.000001
+            return None
+        end_hour, end_minute = map(int, end.split(":"))
+        wraps = (end_hour, end_minute) < (hour, minute)
+        for day in (local.date(), local.date() - timedelta(days=1)):
+            begin = datetime.combine(day, datetime.min.time(), self.zone).replace(hour=hour, minute=minute)
+            finish_day = day + timedelta(days=1) if wraps else day
+            finish = datetime.combine(finish_day, datetime.min.time(), self.zone).replace(hour=end_hour, minute=end_minute)
+            if begin.timestamp() <= now.timestamp() <= finish.timestamp():
+                return day, finish.timestamp()
+        return None
 
     def due_day(self, now):
         local = now.astimezone(self.zone)
@@ -63,14 +133,39 @@ class Store:
     def __init__(self, path):
         self.db = sqlite3.connect(path)
         self.db.execute("CREATE TABLE IF NOT EXISTS deliveries (day TEXT, target TEXT, kind TEXT, source_date TEXT, status TEXT, PRIMARY KEY(day,target,kind))")
+        self.db.execute("CREATE TABLE IF NOT EXISTS schedule_state (kind TEXT PRIMARY KEY, next_fetch REAL NOT NULL, last_error TEXT)")
         self.db.commit()
 
     def has(self, day, target, kind):
         return self.db.execute("SELECT 1 FROM deliveries WHERE day=? AND target=? AND kind=?", (str(day), target, kind)).fetchone() is not None
 
+    def eligible(self, day, target, kind):
+        row = self.db.execute(
+            "SELECT status FROM deliveries WHERE day=? AND target=? AND kind=?",
+            (str(day), target, kind),
+        ).fetchone()
+        return row is None or row[0] == "retryable"
+
     def claim(self, day, target, kind, source):
         with self.db:
-            return self.db.execute("INSERT OR IGNORE INTO deliveries VALUES (?,?,?,?,?)", (str(day), target, kind, source, "pending")).rowcount == 1
+            return self.db.execute(
+                "INSERT INTO deliveries VALUES (?,?,?,?,?) "
+                "ON CONFLICT(day,target,kind) DO UPDATE SET "
+                "source_date=excluded.source_date,status='pending' "
+                "WHERE deliveries.status='retryable'",
+                (str(day), target, kind, source, "pending"),
+            ).rowcount == 1
+
+    def load_schedule_state(self):
+        return self.db.execute("SELECT kind,next_fetch,last_error FROM schedule_state").fetchall()
+
+    def save_schedule_state(self, kind, deadline, error):
+        with self.db:
+            self.db.execute(
+                "INSERT INTO schedule_state VALUES (?,?,?) "
+                "ON CONFLICT(kind) DO UPDATE SET next_fetch=excluded.next_fetch,last_error=excluded.last_error",
+                (kind, deadline, error),
+            )
 
     def finish(self, day, target, kind, status):
         with self.db:
@@ -159,81 +254,98 @@ class HttpClient:
 
 
 class Engine:
-    def __init__(self, settings, store, client, send, log, prepare=None):
+    def __init__(self, settings, store, client, send, log, prepare=None, clock=None):
         self.settings, self.store, self.client = settings, store, client
-        self.send, self.log = send, log
-        self.prepare = prepare
-        self.cache = {}
-        self.next_fetch = {}
-        self.last_error = {}
+        self.send, self.log, self.prepare, self.clock = send, log, prepare, clock
+        state = store.load_schedule_state()
+        self.next_fetch = {kind: deadline for kind, deadline, _ in state}
+        self.last_error = {kind: error for kind, _, error in state if error}
         self.lock = asyncio.Lock()
+
+    def _cooldown(self, kind, current, error=None, retry_after=0):
+        deadline = current.timestamp() + max(self.settings.retry_seconds(kind), retry_after)
+        self.store.save_schedule_state(kind, deadline, error)
+        self.next_fetch[kind] = deadline
+        if error:
+            self.last_error[kind] = error
+        else:
+            self.last_error.pop(kind, None)
 
     async def tick(self, now):
         async with self.lock:
             s = self.settings
-            day = s.due_day(now)
-            if not s.enabled or not s.targets or day is None:
+            if not s.enabled or not s.targets:
                 return
-            self.cache = {k: v for k, v in self.cache.items() if k[0] == day}
-            tasks = [
-                asyncio.create_task(self._deliver_kind(kind, day, now))
-                for kind, enabled in (
-                    ("daily", s.daily_enabled),
-                    ("history", s.history_enabled),
-                )
-                if enabled
-            ]
+            tasks = []
+            for kind, enabled in (("daily", s.daily_enabled), ("history", s.history_enabled)):
+                window = s.window(kind, now)
+                if enabled and window:
+                    tasks.append(asyncio.create_task(self._deliver_kind(kind, window, now)))
             try:
                 await asyncio.gather(*tasks)
             except BaseException:
-                # On unload or storage failure, finish all children before closing DB.
                 for task in tasks:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
                 raise
 
-    async def _deliver_kind(self, kind, day, now):
+    async def _deliver_kind(self, kind, window, now):
         s = self.settings
-        pending = [t for t in s.targets if not self.store.has(day, t, kind)]
-        if not pending:
+        day, end = window
+        current = self.clock or (lambda: now)
+        pending = [t for t in s.targets if self.store.eligible(day, t, kind)]
+        if not pending or current().timestamp() > end or current().timestamp() < self.next_fetch.get(kind, 0):
             return
-        key = (day, kind)
-        if key not in self.cache:
-            if now.timestamp() < self.next_fetch.get(kind, 0):
-                return
-            try:
-                payload = await asyncio.wait_for(
-                    self.client.fetch(kind), s.timeout_seconds
-                )
-                source, text = render(kind, payload, day)
-                if self.prepare is not None:
-                    text = await asyncio.wait_for(
-                        self.prepare(kind, payload, source, text), s.timeout_seconds
-                    )
-                self.cache[key] = source, text
-            except Exception as exc:
-                self.next_fetch[kind] = now.timestamp() + max(
-                    900, getattr(exc, "retry_after", 900)
-                )
-                self.last_error[kind] = str(exc)
-                self.log(f"{kind} 获取失败: {exc}")
-                return
-            self.next_fetch.pop(kind, None)
-            self.last_error.pop(kind, None)
-        source, text = self.cache[key]
+        # Persist a retry reservation before I/O so restart doesn't cause a tight loop.
+        self._cooldown(kind, current())
+        try:
+            payload = await asyncio.wait_for(self.client.fetch(kind), s.timeout_seconds)
+            source, text = render(kind, payload, day)
+        except Exception as exc:
+            self._cooldown(kind, current(), str(exc), getattr(exc, "retry_after", 0))
+            self.log(f"{kind} 获取失败: {exc}")
+            return
+        prepared = {}
+        error = None
+        format_retry_after = 0
         for target in pending:
+            if current().timestamp() > end:
+                break
+            fmt = s.format_for(kind, target)
+            if fmt not in prepared:
+                try:
+                    prepared[fmt] = (
+                        await asyncio.wait_for(self.prepare(kind, payload, source, text, target), s.timeout_seconds)
+                        if self.prepare is not None else text
+                    )
+                except Exception as exc:
+                    prepared[fmt] = exc
+                    format_retry_after = max(format_retry_after, getattr(exc, "retry_after", 0))
+            output = prepared[fmt]
+            if isinstance(output, Exception):
+                error = f"格式准备失败: {output}"
+                self.log(f"{kind} {error}")
+                continue
+            if current().timestamp() > end:
+                break
             if not self.store.claim(day, target, kind, source):
                 continue
             try:
-                result = await asyncio.wait_for(
-                    self.send(target, text), s.timeout_seconds
-                )
-                if result is False:
-                    raise RuntimeError("适配器返回 False")
+                result = await asyncio.wait_for(self.send(target, output), s.timeout_seconds)
             except Exception as exc:
+                # Exceptions may happen after remote delivery. Never assume rejection.
                 self.store.finish(day, target, kind, "failed_or_unknown")
-                self.log(
-                    f"{kind} 发送失败或结果未知，不自动重发: {type(exc).__name__}"
-                )
+                self.log(f"{kind} 发送结果不明，需人工核查: {type(exc).__name__}")
             else:
-                self.store.finish(day, target, kind, "sent")
+                if result is False:
+                    self.store.finish(day, target, kind, "retryable")
+                    error = "平台明确返回 False，等待后重试未成功目标"
+                    self.log(f"{kind} {error}")
+                else:
+                    self.store.finish(day, target, kind, "sent")
+        if any(self.store.eligible(day, target, kind) for target in s.targets):
+            self._cooldown(kind, current(), error, format_retry_after)
+        else:
+            self.store.save_schedule_state(kind, 0, None)
+            self.next_fetch.pop(kind, None)
+            self.last_error.pop(kind, None)

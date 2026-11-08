@@ -1,24 +1,102 @@
-# 60秒日报与历史上的今天
+# 60s 日更与热门榜单（v0.3.0）
 
-每天从 60s API 获取两类内容，通过 AstrBot 的 `context.send_message` 向明确配置的会话发送消息。默认 `enabled=false`、`targets=[]`，不会启动定时后台任务或自动请求 API。热门榜单仅在用户发送命令时查询并回复当前会话，独立于定时总开关。
+两个日更接口按各自时间表向明确指定的 AstrBot 会话推送；24 类热榜只通过命令查询。定时默认关闭，targets 为空，不自动请求或发送。没有执行部署或真实消息投递。
 
-## 热门榜单命令
+## 两个日更接口独立调度
 
-以下 `/` 为示意前缀，实际取决于 AstrBot 配置。支持中文名称及表中英文配置键。
+在 WebUI 配置 `schedules.daily`（每天60秒）和 `schedules.history`（历史上的今天）：
 
-```text
-/热榜
-/热榜 帮助
-/热榜 微博 5
-/热榜 网易云榜单 10
-/热榜 网易云详情 3779629 5
-/热榜 hn best 5
-/热榜 IT之家 week 5
+- `send_time`：每天开始时间，HH:MM。
+- `retry_minutes`：失败后的等待分钟数，1–1440，默认 15。
+- `end_time`：当天最后结束时间，HH:MM；早于开始时间表示次日结束；开始和结束不能相同。
+- 两项共用 `timezone`（默认 Asia/Shanghai），但执行、冷却和失败状态独立。`daily_enabled` / `history_enabled` 分别控制内容，`enabled` 控制定时总开关。
+
+每 30 秒检查一次，实际尝试可能比配置时间晚约 30 秒。新时间表的结束边界为**包含该精确时刻**：例如 10:00 表示 10:00:00，而非整分钟。获取结束、格式准备结束及每个目标发送前检查截止时间；超过后不再启动发送。已开始的请求或投递允许在超时上限内完成，不能保证外部平台在截止前完成投递。
+
+示例（保持关闭，实际启用前确认目标）：
+
+```json
+{
+  "enabled": false,
+  "timezone": "Asia/Shanghai",
+  "targets": [],
+  "schedules": {
+    "daily": {"send_time": "09:00", "retry_minutes": 5, "end_time": "11:00"},
+    "history": {"send_time": "08:30", "retry_minutes": 10, "end_time": "09:30"}
+  }
+}
 ```
 
-默认 10 条，上限 20 条；网易云 ID 从榜单列表取得。HN 分类支持 top/new/best（默认 top），IT之家支持 day/week/month（默认 day）。只回复触发命令的会话，不遍历定时目标。没有定时热门榜单功能。
+每轮每个接口仅获取一次原始 JSON，所有待发送目标复用。获取失败、旧日报、空内容或格式准备失败会等待该接口间隔再重新获取；明确失败的目标重试时也重新获取，不使用上一轮旧缓存。成功目标不再次发送。慢日报不会阻塞历史接口。
 
-同一路径缓存 60 秒并合并并发请求，最多缓存 64 个查询；不同未缓存查询间隔至少 2 秒。命令服务遇到错误冷却至少 15 秒，API 错误默认冷却 15 分钟，429 尊重 Retry-After。定时与命令冷却分别管理，重载后命令缓存/冷却清空。
+429 会等待 `max(接口等待间隔, Retry-After, 15分钟)`，支持秒数或 HTTP 日期；只有被限流的接口等待。若等待结束已超过其窗口，则跳过该窗口。普通获取失败遵循配置间隔，不再强制 15 分钟。
+
+## 安全重试、持久化与跨午夜
+
+投递以“计划开始日期 + 完整目标会话 + 内容类型”为唯一键，SQLite 在发送前先写入占位：
+
+| 状态 | 自动处理 |
+| --- | --- |
+| 无记录 | 窗口内且等待结束后可尝试 |
+| retryable | 平台明确返回 False；下轮重新获取后只重试该目标 |
+| sent | 已确认调用成功，当天不重复 |
+| failed_or_unknown | 超时或任意抛出的异常，可能已送达；不自动重试，需人工核查 |
+| pending | 发送中被取消、崩溃等留下的占位；不自动重试，需人工核查 |
+
+当前 AstrBot 的 `context.send_message=False` 表示未找到匹配平台，属于明确未发送。一般异常即使看起来像网络失败，也可能发生在远端接受消息之后，因此不能当作明确失败重发。这里只对返回 False 自动重试，没有强制重发不明状态的命令。管理员应先在目标平台核对记录，再决定如何人工处理；不要直接删数据库来重试。
+
+成功标记表示接口调用成功，不代表用户已阅读或平台最终送达。占位后进程崩溃可能漏发，优先避免重复。多目标状态独立，部分失败不阻止其他目标；同目标两类内容顺序不保证。
+
+存储：AstrBot 数据目录下 `plugin_data/astrbot_plugin_60s/deliveries.sqlite3`。保留投递记录、真实内容日期以及每接口重试期限/错误；成功全部完成后清除该接口冷却。重启保留未到期的等待（含长 Retry-After），仍在窗口内则继续未完成的明确失败/未尝试目标；窗口外不补发。禁止多进程同时运行本插件实现高可用。
+
+跨午夜窗口归属于**开始日**，如 11月8日 23:50–次日00:20，在9日00:05补发仍按8日去重和校验内容日期。若上游已切换为9日数据，不能冒充8日，跳过并等待直到窗口结束。历史接口也按窗口开始日的月日校验。未到期的失败等待可跨日影响下一窗口，尤其是 Retry-After，不能通过换日绕过限流。
+
+夏令时开始/结束均采用所选 IANA 时区的本地时间（重复时刻使用首次，缺失时刻按系统时区转换顺延）；仍按开始日去重。建议使用 Asia/Shanghai 或避开时钟跳变时段。
+
+## 每个目标分别设置两个日更格式
+
+`targets` 仍是明确允许投递的完整 `event.unified_msg_origin` 列表，格式不是裸群号或接口 URL。`target_formats` 是 WebUI 可添加的目标配置列表，每项选择一个已在 targets 中的会话，然后独立选择 daily 和 history 格式。重复目标配置会报错，不会自动增加新收件人。
+
+以下全部是占位标识，不能直接用于真实投递：
+
+```json
+{
+  "enabled": false,
+  "targets": ["示例实例:GroupMessage:目标A", "示例实例:GroupMessage:目标B"],
+  "target_formats": [
+    {"__template_key": "target", "target": "示例实例:GroupMessage:目标A", "daily": "image", "history": "text"},
+    {"__template_key": "target", "target": "示例实例:GroupMessage:目标B", "daily": "markdown", "history": "json"}
+  ]
+}
+```
+
+- text：整理后的可读文本。
+- json：结构化结果以普通文本发送，保留合法 JSON；不是平台 JSON 卡片，也不是上游完整原始响应。
+- markdown：Markdown 文本，是否渲染取决于聊天平台。
+- image：仅每天60秒支持。先获取 JSON 核验日期，再下载同一响应 data.image，以真正的 AstrBot Image 组件发送，附真实日期与来源。
+
+同一轮同接口相同格式只准备一次，多个 image 目标共享一次下载；目标之间格式不同也不重复获取原始 JSON。某一格式准备失败不阻止其他格式的目标，失败目标在等待后重试。
+
+历史上的今天没有官方整图，界面不给 image 选项，手工填入会明确报错。日报图片仅允许 image_hosts 中精确匹配的 HTTPS 域名，默认 mmbiz.qpic.cn；拒绝重定向，检查 MIME 与 PNG/JPEG/WebP/GIF 文件头，最大5MB，受超时限制。不把 JSON 或图片 URL 字符串当图片发送，不生成虚构图片，不删除原图版权标记。
+
+## 热门榜单：命令选择格式
+
+`/` 为示意前缀，以 AstrBot 配置为准。格式必须放在末尾且只出现一次，默认 text；条数默认10，范围1–20。
+
+```text
+/hot 帮助
+/hot weibo 10
+/hot weibo 10 markdown
+/hot 小红书 json
+/hot 网易云榜单 10 text
+/hot 网易云详情 3779629 5 json
+/hot hn best 5 markdown
+/hot IT之家 week 5 text
+```
+
+HN 类型 top/new/best；IT之家 day/week/month。网易云 ID 从榜单列表取得。榜单可使用表中英文配置键或中文名；另支持 bilibili、xiaohongshu、netease、netease-detail 别名。命令入口仅 /hot，不注册旧 /热榜。只回复当前触发会话，不遍历定时目标。热榜不再读取或显示各接口格式配置；全部使用命令参数。官方未提供整榜图片，命令 image 会明确报错，不静默回退；若要所有榜单图片，需要另行实现排版生成，本版本没有该功能。
+
+HTTP 始终请求 encoding=json，以便核验日期、统一字段、限制条数，再根据发送格式构造消息。不是直接请求上游 text/markdown/image-proxy。热榜同一路径缓存60秒并合并并发请求，不同格式和条数可复用同一份原始数据；最多64项缓存，未缓存查询至少间隔2秒，普通错误冷却至少15秒，429尊重 Retry-After。热榜缓存/冷却不持久化，与定时调度分开。
 
 | 中文名称 | 配置键 | 官方路由（基址后追加 /v2/） | 文档 |
 | --- | --- | --- | --- |
@@ -47,97 +125,36 @@
 | 豆瓣华语综艺 | `douban_show_cn` | `douban/weekly/show_chinese` | [官方](https://docs.60s-api.viki.moe/421324089e0) |
 | 豆瓣全球综艺 | `douban_show_global` | `douban/weekly/show_global` | [官方](https://docs.60s-api.viki.moe/421330297e0) |
 
-返回适配：普通榜单读取 data 数组；猫眼读取 data.list。标题识别 title/name/movie_name/programme_name/series_name；按来源展示热度、评分、票房或收视率，保留 link/url 链接。网易云列表显示 ID，歌曲显示歌手；缺少指标不会伪造。条目封面不作为整榜图片。知乎页面缺少具体响应样例，采用通用字段兼容，需要真实实例验证；懂车帝读取到官方示例字段 title/score/score_desc/url，但公共服务可用性未经本机验证，遇到 403 直接提示失败，不绕过限制。
+普通榜单适配 data 数组，猫眼适配 data.list；标题识别 title/name/movie_name/programme_name/series_name。按实际字段展示热度、评分、票房、收视率及 link/url；缺少字段不伪造。网易云列表显示ID，详情显示歌手。知乎缺少完整响应样例，采用通用字段兼容；懂车帝读取到文档示例，但公共服务可用性未验证，403不绕过。所有来源仍需真实实例联调。
 
-## 每个接口的发送格式
+## 旧配置与数据兼容
 
-`formats` 对象含 daily、history 和上述 24 个配置键，分别选择发送格式：
+不读取或修改用户的真实配置文件，迁移在插件接收配置后进行内存归一化；默认仍不启用发送。
 
-- `text`：整理后的可读文本。
-- `json`：结构化结果作为文本消息，保持合法 JSON（并非平台的 JSON 卡片）。日更含真实 source_date 和已核验正文；热榜含整理后的 items，不是上游原始完整响应。
-- `markdown`：整理后的 Markdown 文本。是否渲染取决于平台，不能保证所有聊天平台都显示富文本。
-- `image`：仅 daily 支持。先以 JSON 核验日报日期，再读取同一响应的 data.image，下载后以 AstrBot Image 组件发送，并附真实日期/来源。不会将 URL 或 JSON 当作图片。
+- 未填写接口 send_time 时继承旧全局 send_time（默认09:00）。未填写接口 end_time 时保留旧 catchup_minutes 窗口（默认120分钟），旧模式结束时刻不含且不跨午夜。接口 retry_minutes 默认15。填写 end_time 后启用新的包含结束边界/跨午夜规则。
+- 旧 formats.daily/history 仍作为未配置目标或留空格式的默认值，缺省为text。旧 formats 对象作为隐藏字典保留，避免更新对象schema时删除旧值；其中热榜键保留但不再参与查询。
+- 新增目标格式列表不会自动覆盖旧默认。配置文件未被插件调用 save_config 写回。AstrBot 本身会按 schema 补充新默认字段，建议升级前备份已有配置与数据库。
+- 原 deliveries 表保持不变，仅创建 schedule_state 表。旧 pending/failed_or_unknown 不改成可重试；旧 sent 保留。不会因为升级重置当天去重。
 
-API 的 encoding 与本插件发送格式是不同概念：为核验日期、限制条数及统一字段，HTTP 始终请求 `encoding=json`，再按 formats 转换消息。没有额外请求同一接口的 text/markdown 版本，也没有伪称使用上游 image-proxy。
+## 其他配置与验证
 
-示例（合并进完整配置，不要省略你需要的其他设置）：
+base_url 默认 https://60s.viki.moe，不含/v2；timeout_seconds 默认20，限制HTTP、格式准备和单次发送时间。原始JSON最大1MB，单条文本约3500字符，超长明确截断；JSON通过减少条目保持有效。targets 必须为支持主动消息的平台会话，v4.29.4 源码注明 qq_official 不支持此主动发送方法。停用/重载会取消并等待后台/命令任务，关闭HTTP会话与数据库；存储错误会停止调度，避免丢失去重后继续发。
 
-```json
-{
-  "enabled": false,
-  "targets": [],
-  "formats": {
-    "daily": "image",
-    "history": "text",
-    "weibo": "markdown",
-    "douban_movie": "json"
-  }
-}
-```
-
-历史上的今天和热门榜单的界面选项只有 text/json/markdown；手工填 image 时会报中文错误，不静默回退。若希望所有榜单也以图片展示，需要另行实现文字排版生成图片，本版本未实现。
-
-日报图片仅允许 `image_hosts` 中精确匹配的 HTTPS 域名，默认 mmbiz.qpic.cn；拒绝重定向，检查 MIME 和 PNG/JPEG/WebP/GIF 文件头，最多 5MB，受超时控制。图片地址或格式异常时不发送。保留原日报图片内容和来源，不裁掉版权标记；API 可访问不代表获得任意再分发许可，使用者仍需遵守来源条款。
-
-## 配置
-
-在 AstrBot WebUI 配置本插件，参考 `config.example.json`。修改后重载插件。
-
-| 字段 | 默认值 | 含义 |
-| --- | --- | --- |
-| enabled | false | 主动发送总开关 |
-| base_url | https://60s.viki.moe | 服务基址，插件追加 `/v2/60s` 和 `/v2/today-in-history` |
-| timezone | Asia/Shanghai | IANA 时区，需系统时区数据库 |
-| send_time | 09:00 | 每天本地时间，24 小时 HH:MM |
-| targets | [] | 完整 `event.unified_msg_origin` 字符串列表，重复项合并 |
-| daily_enabled | true | 是否发送每天60秒读懂世界 |
-| history_enabled | true | 是否发送历史上的今天 |
-| catchup_minutes | 120 | 当天计划时刻后的补发窗口，1–1440 分钟 |
-| timeout_seconds | 20 | 单次 HTTP/发送超时，1–120 秒 |
-| formats | 各接口 text | 每个接口独立的消息格式 |
-| image_hosts | [mmbiz.qpic.cn] | 允许的日报图片 HTTPS 域名 |
-
-`targets` 需要从实际 AstrBot 会话取得，例如通过现有会话管理界面或该会话事件的 `event.unified_msg_origin`。结构为 `平台实例ID:消息类型:会话ID`，不能填写接口 URL、适配器名称或裸群号。这里不提供可误用的真实目标，也没有自动订阅或自动发现群聊功能。确认平台支持主动消息后再启用。AstrBot v4.29.4 源码注明 `qq_official` 不支持该主动发送方法；其他平台也可能限制长度/频次。
-
-## 调度、去重与恢复
-
-- 每 30 秒检查一次；默认 09:00 到 11:00（不含 11:00）允许当天补发。进程停机后在窗口内启动会补发；超过窗口跳过，不补历史日期。
-- 夏令时重复小时仍使用同一自然日去重键；不存在的计划时刻按时区转换后的时间执行（通常顺延一个小时）。建议使用 Asia/Shanghai 或避开 DST 跳变时段。
-- 每个日期、会话、内容类型最多自动尝试发送一次；两类内容分开发送。先提交 SQLite 占位，再调用适配器，成功标为 `sent`，异常/超时标为 `failed_or_unknown`，被取消或崩溃可保留 `pending`。
-- 三种记录都会阻止当日重发。这是“最多尝试一次”而非保证送达：占位后崩溃可能漏发；平台返回成功也不等于对方已收到。不要直接删除数据库，否则会丢失去重保护。
-- 存储位置：AstrBot 数据目录的 `plugin_data/astrbot_plugin_60s/deliveries.sqlite3`。保存计划日期、真实接口日期、目标和状态。升级时保留该文件。记录暂不自动清理。
-- 每种内容成功获取后缓存在内存，所有目标复用，不逐群请求。部分目标失败不阻止其他目标。
-- 接口错误、空内容、日期不匹配、超时至少冷却 15 分钟，每个定时接口分别记录冷却期限和最后失败原因；HTTP 429 仅冷却对应接口，并尊重更长的 Retry-After（秒数或 HTTP 日期）。日报与历史任务并发执行，旧日报、接口异常或慢请求不阻塞另一项原定推送。成功获取后清除该接口的失败状态。跨日保留尚未到期的冷却期限，不绕过长 Retry-After；当日窗口外仍不重试。
-- 重启保留发送记录，但内存缓存和请求冷却不保留；若有未发送目标，可能重新获取接口。频繁重载不适合用来绕过上游限流。
-- 日报必须返回计划日期，旧日报/未来日报一律跳过并记录真实返回日期到警告日志，不假装为今天的内容。历史接口按真实返回月日核验，空值和无标题项忽略，无有效条目则不发送。
-- 单条内容超过 3500 字符会截断并明确标注。发送失败不自动拆分重发。接口重定向拒绝、响应限制 1MB，使用异步 aiohttp，无阻塞网络请求。
-- 停用/重载会取消并等待后台任务、关闭 HTTP 会话和数据库。存储异常使后台调度停止，需要检查后重载，避免丢失去重状态时继续发送。
-- 同一实例中重复 initialize 不重复启动。SQLite 唯一键可保护共享数据库的发送占位，但不支持以多个进程部署本插件实现高可用或共享请求缓存。
-
-## 安装和兼容性
-
-目标为 Python 3.12+ / AstrBot 4.29.4，元数据限制 `>=4.29.4,<5`；这是基于文档和 v4.29.4 源码的 API 目标范围，不是所有版本已实测的保证。依赖 `aiohttp>=3.11.18,<4`，AstrBot 本身也使用该依赖。
-
-本任务未部署：后续授权安装时，将本目录完整复制到独立开发实例的 `data/plugins/astrbot_plugin_60s/`，保持默认关闭，检查插件加载和配置，再确认目标。仓库为私有开发仓库，未发布至插件市场。
-
-## 开发验证
-
-在工作区根目录执行：
+目标环境 Python 3.12+、AstrBot >=4.29.4,<5，依赖 aiohttp>=3.11.18,<4。API范围依据文档和v4.29.4源码，不代表所有版本已实测。仓库私有，未发布插件市场。
 
 ```sh
 python3 -m unittest discover -s tests -v
 python3 -m compileall -q main.py core.py hot.py formats.py tests
 ```
 
-测试用标准库 unittest、模拟 HTTP 客户端/响应、模拟发送、临时 SQLite 和假 AstrBot API；不会调用真实接口或发送真实消息。`core.py` 的 Engine 支持注入 client、send、logger，tick 接收明确时间用于确定性测试。
+测试全部使用模拟客户端、模拟发送、模拟事件、假AstrBot API和临时SQLite，不调用真实API或发送消息。Engine可注入客户端、发送函数、格式准备函数、当前时间；覆盖独立调度、失败分类、重启、截止边界、跨午夜、多目标格式与共享请求、命令参数冲突。
 
-真实 AstrBot/aiohttp 未安装，尚未验证 WebUI 加载、真实接口连接、平台投递。PyPI 下载检查工具遇到 DNS 失败，Ruff 未运行；未安装系统软件或修改现有实例。
+真实 AstrBot/aiohttp 尚未安装，WebUI 加载、真实接口和平台投递尚未联调；此前 PyPI DNS 失败，Ruff未运行。未修改生产实例、系统软件或网络。API可访问不等于任意再分发许可，应遵守来源条款。
 
-## 参考
+## 官方参考
 
 - https://docs.60s-api.viki.moe/254026209e0
 - https://docs.60s-api.viki.moe/254044388e0
-- https://docs.astrbot.app/dev/star/guides/send-message.html
 - https://docs.astrbot.app/dev/star/guides/plugin-config.html
-- https://docs.astrbot.app/dev/star/guides/storage.html
+- https://docs.astrbot.app/dev/star/guides/send-message.html
 - https://github.com/AstrBotDevs/AstrBot/blob/v4.29.4/astrbot/core/star/context.py

@@ -13,30 +13,19 @@
   ],
   "formats": {
     "daily": "text",
-    "history": "text",
-    "douyin": "text",
-    "ithome": "text",
-    "rednote": "text",
-    "bili": "text",
-    "weibo": "text",
-    "quark": "text",
-    "baidu": "text",
-    "baidu_tv": "text",
-    "tieba": "text",
-    "toutiao": "text",
-    "zhihu": "text",
-    "dongchedi": "text",
-    "ncm_list": "text",
-    "ncm_detail": "text",
-    "hn": "text",
-    "maoyan_all": "text",
-    "maoyan_movie": "text",
-    "maoyan_tv": "text",
-    "maoyan_web": "text",
-    "douban_movie": "text",
-    "douban_tv_cn": "text",
-    "douban_tv_global": "text",
-    "douban_show_cn": "text",
-    "douban_show_global": "text"
-  }
+    "history": "text"
+  },
+  "schedules": {
+    "daily": {
+      "send_time": "",
+      "retry_minutes": 15,
+      "end_time": ""
+    },
+    "history": {
+      "send_time": "",
+      "retry_minutes": 15,
+      "end_time": ""
+    }
+  },
+  "target_formats": []
 }

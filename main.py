@@ -24,7 +24,7 @@ class WorkspacePlugin(Star):
         self.store = None
         self.closed = False
         self.queries = set()
-        self.hot = HotService(self._fetch_hot, self.settings.formats, self.settings.timeout_seconds)
+        self.hot = HotService(self._fetch_hot, timeout=self.settings.timeout_seconds)
 
     def _client(self):
         if self.closed:
@@ -37,8 +37,8 @@ class WorkspacePlugin(Star):
     async def _fetch_hot(self, path):
         return await self._client().fetch_path(path)
 
-    async def _prepare(self, kind, payload, source, text):
-        return await daily_output(kind, payload, source, text, self.settings.formats.get(kind, "text"), self._load_image)
+    async def _prepare(self, kind, payload, source, text, target):
+        return await daily_output(kind, payload, source, text, self.settings.format_for(kind, target), self._load_image)
 
     async def _load_image(self, url):
         self._client()
@@ -52,7 +52,7 @@ class WorkspacePlugin(Star):
         self.store = Store(path / "deliveries.sqlite3")
         try:
             client = self._client()
-            self.engine = Engine(self.settings, self.store, client, self._send, logger.warning, self._prepare)
+            self.engine = Engine(self.settings, self.store, client, self._send, logger.warning, self._prepare, clock=lambda: datetime.now(UTC))
             self.task = asyncio.create_task(self._run(), name="astrbot-60s-daily")
         except Exception:
             await self.terminate()
@@ -73,12 +73,12 @@ class WorkspacePlugin(Star):
         chain.chain = self._components(output)
         return await self.context.send_message(target, chain)
 
-    @filter.command("热榜")
-    async def hot_command(self, event: AstrMessageEvent, source: str = "帮助", argument: str = "", count: str = ""):
-        """查询热门榜单：热榜 榜单 [条数]；网易云详情另需榜单ID。"""
+    @filter.command("hot")
+    async def hot_command(self, event: AstrMessageEvent, source: str = "帮助", argument: str = "", count: str = "", output_format: str = ""):
+        """查询热门榜单：hot 榜单 [条数] [text/json/markdown]；网易云详情另需榜单ID。"""
         if self.closed:
             return
-        task = asyncio.create_task(self.hot.query(source, argument, count))
+        task = asyncio.create_task(self.hot.query(source, argument, count, output_format))
         self.queries.add(task)
         try:
             output = await task
