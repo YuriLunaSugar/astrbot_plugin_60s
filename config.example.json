@@ -8,9 +8,6 @@
   "history_enabled": true,
   "catchup_minutes": 120,
   "timeout_seconds": 20,
-  "image_hosts": [
-    "mmbiz.qpic.cn"
-  ],
   "formats": {
     "daily": "text",
     "history": "text"

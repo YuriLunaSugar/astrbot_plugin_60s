@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from astrbot_plugin_60s.core import ApiError
-from astrbot_plugin_60s.formats import check_format, daily_output, load_image
+from astrbot_plugin_60s.formats import check_format, daily_output
 from astrbot_plugin_60s.hot import BOARDS, LOOKUP, HotService, normalize, parse_query
 from test_http import Response
 
@@ -78,9 +78,6 @@ class HotTests(unittest.IsolatedAsyncioTestCase):
     async def test_image_output_and_text_encodings(self):
         loader = AsyncMock(return_value=b'valid-image')
         payload = {'data':{'image':'https://mmbiz.qpic.cn/a'}}
-        result = await daily_output('daily',payload,'2026-11-08','正文','image',loader)
-        self.assertEqual(result.image,b'valid-image')
-        self.assertIn('2026-11-08',result.text)
         for fmt in ('text','json','markdown'):
             result = await daily_output('daily',payload,'2026-11-08','正文',fmt,loader)
             self.assertIsNone(result.image)
@@ -88,21 +85,6 @@ class HotTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(json.loads(result.text)['source_date'],'2026-11-08')
         with self.assertRaisesRegex(ApiError,'不支持 image'):
             await daily_output('history',payload,'11-8','正文','image',loader)
-        with self.assertRaisesRegex(ApiError,'没有返回 image'):
-            await daily_output('daily',{'data':{}},'2026-11-08','正文','image',loader)
-
-    async def test_image_mime_size_host_and_signature(self):
-        valid = Response(body=b'\x89PNG\r\n\x1a\nmock',headers={'Content-Type':'image/png'})
-        session = SimpleNamespace(get=lambda *a,**k:valid)
-        raw = await load_image(session,'https://mmbiz.qpic.cn/a',['mmbiz.qpic.cn'])
-        self.assertEqual(raw,valid.body)
-        for response in (Response(body=b'{}',headers={'Content-Type':'application/json'}), Response(body=b'{}',headers={'Content-Type':'image/png'}), Response(302), Response(body=b'x'*5_000_001,headers={'Content-Type':'image/png'})):
-            session = SimpleNamespace(get=lambda *a,**k:response)
-            with self.assertRaises(ApiError):
-                await load_image(session,'https://mmbiz.qpic.cn/a',['mmbiz.qpic.cn'])
-        with self.assertRaises(ApiError):
-            await load_image(session,'http://127.0.0.1/a',['mmbiz.qpic.cn'])
-
     async def test_command_format_suffix_and_conflicts(self):
         fetch=AsyncMock(return_value={'code':200,'data':[{'title':'模拟'}]})
         service=HotService(fetch)

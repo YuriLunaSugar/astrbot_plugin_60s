@@ -93,7 +93,8 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                 payload = daily(); payload['data']['image']='https://mmbiz.qpic.cn/demo.png'
                 client.fetch.side_effect=lambda kind: payload if kind=='daily' else history()
                 disabled._client=lambda: client
-                disabled.manual.image_loader=AsyncMock(return_value=b'fake-image')
+                from astrbot_plugin_60s.image_api import ImageResult
+                disabled.manual.image_loader=AsyncMock(return_value=ImageResult('2026-11-08',Output('date',b'fake-image')))
                 sender=types.SimpleNamespace(send_message=AsyncMock())
                 disabled.context=sender
                 caller_event=types.SimpleNamespace(
@@ -106,15 +107,15 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                 replies=[r async for r in disabled.history_command(caller_event)]
                 self.assertEqual(replies[0][0],'caller-only')
                 self.assertEqual(len(replies[0][1]),1)
-                self.assertEqual([c.args[0] for c in client.fetch.await_args_list],['daily','daily','history'])
+                self.assertEqual([c.args[0] for c in client.fetch.await_args_list],['history'])
                 self.assertEqual(disabled.manual.image_loader.await_count,2)
                 client.fetch.side_effect=TimeoutError()
                 replies=[r async for r in disabled.daily_command(caller_event,'text')]
                 self.assertIn('超时',replies[0][1])
-                self.assertEqual(client.fetch.await_count,4)
+                self.assertEqual(client.fetch.await_count,2)
                 replies=[r async for r in disabled.history_command(caller_event,'image')]
                 self.assertIn('不支持 image',replies[0][1])
-                self.assertEqual(client.fetch.await_count,4)
+                self.assertEqual(client.fetch.await_count,2)
                 self.assertEqual(before_db,list(disabled.store.db.iterdump()))
                 self.assertEqual(before_settings,asdict(disabled.settings))
                 self.assertEqual(before_config,Path(directory,'config.json').read_bytes())

@@ -28,8 +28,8 @@ class ManualService:
         allowed = 'image/text/json/markdown' if kind == 'daily' else 'text/json/markdown'
         if fmt in ('帮助', 'help', '-h', '--help'):
             return Output(f'{command} [格式]\n可选：{allowed}；默认：{"image" if kind == "daily" else "text"}。\n'
-                          '每次有效查询重新请求对应 API 一次，只回复当前会话，不改变定时记录。'
-                          '图片另需下载一次；限流期间拒绝请求，不自动重试。'
+                          '每次有效查询只回复当前会话，不改变定时记录。'
+                          '图片先请求 image，文件名无日期再请求 JSON（1 或 2 次 API 查询），随后下载图片；无法确认日期会提示。其他格式查询一次；不自动重试。'
                           '仅查询接口当前内容，不支持指定日期或其他发送目标。')
         if fmt not in ('image', 'text', 'json', 'markdown'):
             raise ApiError(f'发送格式无效，请使用 {command} [{allowed}]')
@@ -39,6 +39,15 @@ class ManualService:
         remaining = math.ceil(deadline - self.clock().timestamp())
         if remaining > 0:
             raise ApiError(f'接口限流等待中，请在 {remaining} 秒后手动重试；本次未请求')
+        if fmt == 'image':
+            try:
+                result = await asyncio.wait_for(self.image_loader(), self.timeout)
+            except ApiError as exc:
+                if exc.retry_after:
+                    self.image_until = self.clock().timestamp() + exc.retry_after
+                    raise ApiError(f'{exc}；至少等待 {math.ceil(exc.retry_after)} 秒，本次不重试', exc.retry_after) from exc
+                raise
+            return result.output
         try:
             payload = await asyncio.wait_for(self.fetch(kind), self.timeout)
         except ApiError as exc:

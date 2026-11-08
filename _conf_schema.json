@@ -67,7 +67,8 @@
     "default": [
       "mmbiz.qpic.cn"
     ],
-    "description": "日报图片允许的 HTTPS 域名（精确匹配，不允许重定向）"
+    "description": "旧图片白名单，仅保留旧值，不再使用",
+    "invisible": true
   },
   "target_formats": {
     "type": "text",

@@ -11,9 +11,10 @@ from astrbot.api.star import Context, Star
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .core import ApiError, Engine, HttpClient, Settings, Store, upgrade_config
-from .formats import Output, daily_output, load_image
+from .formats import Output, daily_output
 from .hot import HotService
 from .manual import ManualService
+from .image_api import ImageService
 
 
 class WorkspacePlugin(Star):
@@ -59,9 +60,10 @@ class WorkspacePlugin(Star):
     async def _prepare(self, kind, payload, source, text, target):
         return await daily_output(kind, payload, source, text, self.settings.format_for(kind, target), self._load_image)
 
-    async def _load_image(self, url):
-        self._client()
-        return await load_image(self.session, url, self.settings.image_hosts)
+    async def _load_image(self, expected=None, json_fetch=None):
+        client = self._client()
+        service = ImageService(self.settings, self.session, json_fetch or (lambda: client.fetch("daily")))
+        return await service.query(expected)
 
     async def initialize(self):
         if self.task is not None or not self.settings.enabled or not self.settings.targets:
@@ -71,7 +73,7 @@ class WorkspacePlugin(Star):
         self.store = Store(path / "deliveries.sqlite3")
         try:
             client = self._client()
-            self.engine = Engine(self.settings, self.store, client, self._send, logger.warning, self._prepare, clock=lambda: datetime.now(UTC))
+            self.engine = Engine(self.settings, self.store, client, self._send, logger.warning, self._prepare, clock=lambda: datetime.now(UTC), image_query=self._load_image)
             self.task = asyncio.create_task(self._run(), name="astrbot-60s-daily")
         except Exception:
             await self.terminate()

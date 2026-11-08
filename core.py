@@ -333,8 +333,9 @@ class HttpClient:
 
 
 class Engine:
-    def __init__(self, settings, store, client, send, log, prepare=None, clock=None):
+    def __init__(self, settings, store, client, send, log, prepare=None, clock=None, image_query=None):
         self.settings, self.store, self.client = settings, store, client
+        self.image_query = image_query
         self.send, self.log, self.prepare, self.clock = send, log, prepare, clock
         state = store.load_schedule_state()
         self.next_fetch = {kind: deadline for kind, deadline, _ in state}
@@ -372,6 +373,22 @@ class Engine:
             self.round_tasks[key] = asyncio.create_task(self._fetch_once(kind, now))
         return await asyncio.shield(self.round_tasks[key])
 
+    async def _image_once(self, day, now):
+        try:
+            return await self.image_query(day, lambda: self._shared_fetch("daily", now))
+        except ApiError as exc:
+            if exc.retry_after:
+                deadline = (self.clock or (lambda: now))().timestamp() + exc.retry_after
+                self.store.save_schedule_state("api:daily", deadline, str(exc))
+                self.next_fetch["api:daily"] = deadline
+            raise
+
+    async def _shared_image(self, day, now):
+        key = ("image", day)
+        if key not in self.round_tasks:
+            self.round_tasks[key] = asyncio.create_task(self._image_once(day, now))
+        return await asyncio.shield(self.round_tasks[key])
+
     async def _prepare_once(self, kind, payload, source, text, target, now, limit_key):
         try:
             return await self.prepare(kind, payload, source, text, target)
@@ -400,10 +417,10 @@ class Engine:
                 return
             self.round_tasks = {}
             tasks = []
-            scopes = s.targets if s.target_schedules else (None,)
+            scopes = s.targets if s.target_schedules or self.image_query is not None else (None,)
             for target in scopes:
                 for kind in ("daily", "history"):
-                    enabled = s.format_for(kind, target) != "off" if target is not None else getattr(s, kind + "_enabled")
+                    enabled = (s.format_for(kind, target) != "off" and (bool(s.target_schedules) or getattr(s, kind + "_enabled"))) if target is not None else getattr(s, kind + "_enabled")
                     if not enabled:
                         continue
                     window = s.window(kind, now, target)
@@ -435,9 +452,20 @@ class Engine:
             return
         # Persist a retry reservation before I/O so restart doesn't cause a tight loop.
         self._cooldown(kind, current(), target=scope_target)
+        image_mode = (kind == "daily" and self.image_query is not None
+                      and s.format_for(kind, scope_target) == "image")
         try:
-            payload = await asyncio.wait_for(self._shared_fetch(kind, now), s.timeout_seconds)
-            source, text = render(kind, payload, day)
+            if image_mode:
+                remaining = self.next_fetch.get("format:daily:image", 0) - current().timestamp()
+                if remaining > 0:
+                    raise ApiError("图片仍在 Retry-After 等待期内", remaining)
+                result = await asyncio.wait_for(self._shared_image(day, now), s.timeout_seconds)
+                source, payload, text = result.source, result.output, ""
+                if source != day.isoformat() or source != current().astimezone(ZoneInfo(s.timezone)).date().isoformat():
+                    raise ApiError("图片日期不是当天计划日期，等待后重试")
+            else:
+                payload = await asyncio.wait_for(self._shared_fetch(kind, now), s.timeout_seconds)
+                source, text = render(kind, payload, day)
         except Exception as exc:
             self._cooldown(kind, current(), str(exc), getattr(exc, "retry_after", 0), scope_target)
             self.log(f"{kind} 获取失败: {exc}")
@@ -451,7 +479,7 @@ class Engine:
             fmt = s.format_for(kind, target)
             if fmt not in prepared:
                 try:
-                    prepared[fmt] = (
+                    prepared[fmt] = payload if image_mode else (
                         await asyncio.wait_for(self._shared_prepare(kind, payload, source, text, target, current()), s.timeout_seconds)
                         if self.prepare is not None else text
                     )
@@ -464,6 +492,9 @@ class Engine:
                 self.log(f"{kind} {error}")
                 continue
             if current().timestamp() > end:
+                break
+            if image_mode and source != current().astimezone(ZoneInfo(s.timezone)).date().isoformat():
+                error = "取图期间跨日，等待下一计划"
                 break
             if not self.store.claim(day, target, kind, source):
                 continue

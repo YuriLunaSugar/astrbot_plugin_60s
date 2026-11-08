@@ -6,13 +6,15 @@ from unittest.mock import AsyncMock
 from astrbot_plugin_60s.core import ApiError
 from astrbot_plugin_60s.manual import ManualService
 from test_core import daily, history
+from astrbot_plugin_60s.image_api import ImageResult
+from astrbot_plugin_60s.formats import Output
 
 
 class ManualTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.now=datetime(2026,11,8,1,tzinfo=UTC)
         self.fetch=AsyncMock(side_effect=lambda k: daily() if k=='daily' else history())
-        self.image=AsyncMock(return_value=b'fake-safe-image')
+        self.image=AsyncMock(return_value=ImageResult('2026-11-08',Output('模拟图片日期',b'fake-safe-image')))
         self.service=ManualService(self.fetch,self.image,timezone='Asia/Shanghai',clock=lambda:self.now)
 
     async def test_repeated_queries_each_fetch_once_without_result_cache(self):
@@ -27,12 +29,12 @@ class ManualTests(unittest.IsolatedAsyncioTestCase):
         self.fetch.side_effect=lambda k:payload if k=='daily' else history()
         result=await self.service.query('daily')
         self.assertEqual(result.image,b'fake-safe-image')
-        self.assertEqual(self.fetch.await_count,1)
-        self.image.assert_awaited_once_with('https://mmbiz.qpic.cn/demo.png')
+        self.assertEqual(self.fetch.await_count,0)
+        self.image.assert_awaited_once_with()
         result=await self.service.query('history')
         self.assertIsNone(result.image)
         self.assertIn('11-8',result.text)
-        self.assertEqual(self.fetch.await_count,2)
+        self.assertEqual(self.fetch.await_count,1)
 
     async def test_stale_json_keeps_actual_date_and_valid_json(self):
         self.fetch.side_effect=lambda _:daily('2026-11-07')
@@ -75,9 +77,10 @@ class ManualTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(OSError):await self.service.query('daily','text')
         self.assertEqual(self.fetch.await_count,1)
         self.fetch.side_effect=lambda _:daily()
-        with self.assertRaisesRegex(ApiError,'image'):await self.service.query('daily')
-        self.assertEqual(self.fetch.await_count,2)
-        self.image.assert_not_awaited()
+        result=await self.service.query('daily')
+        self.assertEqual(result.image,b'fake-safe-image')
+        self.assertEqual(self.fetch.await_count,1)
+        self.image.assert_awaited_once_with()
 
     async def test_bad_dates_and_empty_content_rejected_once(self):
         for kind,payload in [('daily',daily('not-a-date')),('history',history())]:
@@ -96,10 +99,10 @@ class ManualTests(unittest.IsolatedAsyncioTestCase):
         self.image.side_effect=ApiError('图片 HTTP 429',900)
         with self.assertRaisesRegex(ApiError,'900'):await self.service.query('daily')
         with self.assertRaisesRegex(ApiError,'限流'):await self.service.query('daily')
-        self.assertEqual(self.fetch.await_count,1)
+        self.assertEqual(self.fetch.await_count,0)
         self.assertEqual(self.image.await_count,1)
         await self.service.query('daily','text')
-        self.assertEqual(self.fetch.await_count,2)
+        self.assertEqual(self.fetch.await_count,1)
 
     async def test_server_limit_reader_does_not_mutate_scheduled_state(self):
         state={'api:daily':self.now.timestamp()+60}
@@ -128,31 +131,24 @@ class ManualTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(stopped.is_set())
         self.assertEqual(self.fetch.await_count,2)
 
-    async def test_http_one_json_request_and_one_optional_image_download(self):
+    async def test_http_one_image_api_without_json_when_filename_has_date(self):
         from types import SimpleNamespace
-        from astrbot_plugin_60s.core import HttpClient, Settings
-        from astrbot_plugin_60s.formats import load_image
+        from astrbot_plugin_60s.core import HttpClient,Settings
+        from astrbot_plugin_60s.image_api import ImageService
         from test_http import Response
         calls=[]
-        image_url='https://mmbiz.qpic.cn/demo.png'
         def get(url,**kwargs):
             calls.append((url,kwargs))
-            if url==image_url:
-                return Response(body=b'\x89PNG\r\n\x1a\nMOCK',headers={'Content-Type':'image/png'})
-            payload=daily() if url.endswith('/60s') else history()
-            payload['data']['image']=image_url
-            return Response(body=json.dumps(payload).encode())
-        session=SimpleNamespace(get=get)
-        client=HttpClient(Settings(),session)
-        async def image_loader(url):return await load_image(session,url,['mmbiz.qpic.cn'])
-        service=ManualService(client.fetch,image_loader,clock=lambda:self.now)
-        await service.query('daily')
-        self.assertEqual([c[0] for c in calls],['https://60s.viki.moe/v2/60s',image_url])
-        self.assertEqual(calls[0][1]['params'],{'encoding':'json'})
-        self.assertTrue(all(c[1]['allow_redirects'] is False for c in calls))
-        await service.query('history')
-        self.assertEqual(len(calls),3)
-        self.assertEqual(calls[-1][0],'https://60s.viki.moe/v2/today-in-history')
+            if url.endswith('/v2/60s'):
+                return Response(302,headers={'Location':'https://cdn.example/2026-11-08.png'})
+            return Response(body=b'opaque-image')
+        session=SimpleNamespace(get=get);client=HttpClient(Settings(),session)
+        images=ImageService(Settings(),session,lambda:client.fetch('daily'),clock=lambda:self.now)
+        service=ManualService(client.fetch,images.query,clock=lambda:self.now)
+        for _ in range(2):
+            self.assertEqual((await service.query('daily')).image,b'opaque-image')
+        self.assertEqual(len(calls),4)
+        self.assertEqual([c[1]['params'] for c in calls if 'params' in c[1]],[{'encoding':'image'}]*2)
 
     async def test_concurrent_commands_are_not_coalesced(self):
         import asyncio
