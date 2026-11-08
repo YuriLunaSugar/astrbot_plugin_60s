@@ -19,13 +19,10 @@ class ConfigExamplesTests(unittest.TestCase):
         self.assertIn('example_bot:GroupMessage:demo_group_A',targets['hint'])
         self.assertIn('event.unified_msg_origin',targets['hint'])
         formats=self.schema['target_formats']
-        self.assertEqual(formats['default'],[])
-        self.assertIn('daily=image',formats['hint'])
-        self.assertIn('history=json',formats['hint'])
+        self.assertEqual(json.loads(formats['default']),[])
+        self.assertIn('\"daily\":\"image\"',formats['hint'])
+        self.assertIn('\"history\":\"json\"',formats['hint'])
         self.assertFalse(self.schema['enabled']['default'])
-        template=formats['templates']['target']['items']
-        self.assertEqual(template['target']['default'],'')
-        self.assertNotIn('image',template['history']['options'])
 
     def test_examples_parse_without_enabling_delivery(self):
         a='example_bot:GroupMessage:demo_group_A'
@@ -41,5 +38,5 @@ class ConfigExamplesTests(unittest.TestCase):
         self.assertEqual(config.format_for('history',b),'json')
         actual=json.loads((self.root/'config.example.json').read_text())
         self.assertEqual(actual['targets'],[])
-        self.assertEqual(actual['target_formats'],[])
+        self.assertEqual(json.loads(actual['target_formats']),[])
         self.assertFalse(Settings(**actual).enabled)

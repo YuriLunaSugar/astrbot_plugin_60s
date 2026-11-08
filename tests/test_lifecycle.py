@@ -38,6 +38,24 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             with patch.dict(sys.modules, modules):
                 module = importlib.import_module('astrbot_plugin_60s.main')
                 self.assertEqual(registered_commands, ['hot'])
+                class SavedConfig(dict):
+                    def save_config(self, replace_config):
+                        import json
+                        from pathlib import Path
+                        Path(directory, 'config.json').write_text(json.dumps(replace_config))
+                        self.update(replace_config)
+                old_config = SavedConfig(target_formats={}, formats={'history':'json'})
+                migrated = module.WorkspacePlugin(object(), old_config)
+                import json
+                from pathlib import Path
+                saved = json.loads(Path(directory, 'config.json').read_text())
+                self.assertEqual(saved['target_formats'], '{}')
+                self.assertEqual(saved['formats'], {'history':'json'})
+                await migrated.terminate()
+                invalid = SavedConfig(target_formats={'unapproved:GroupMessage:demo': {'daily':'image'}})
+                with self.assertRaises(ValueError):
+                    module.WorkspacePlugin(object(), invalid)
+                self.assertEqual(json.loads(Path(directory, 'config.json').read_text()), saved)
                 disabled = module.WorkspacePlugin(object(), {})
                 await disabled.initialize()
                 self.assertIsNone(disabled.task)

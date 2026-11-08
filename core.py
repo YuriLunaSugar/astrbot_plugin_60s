@@ -1,5 +1,6 @@
 """Framework-independent daily delivery engine; all external I/O is injectable."""
 import asyncio
+import copy
 import json
 import re
 import sqlite3
@@ -16,10 +17,19 @@ class ApiError(Exception):
         self.retry_after = retry_after
 
 
+def upgrade_config(config):
+    """Keep legacy data intact while making it editable without a template menu."""
+    updated = copy.deepcopy(dict(config))
+    value = updated.get("target_formats")
+    if isinstance(value, (dict, list)):
+        updated["target_formats"] = json.dumps(value, ensure_ascii=False, indent=2)
+    return updated
+
+
 @dataclass
 class Settings:
     schedules: dict = field(default_factory=dict)
-    target_formats: dict | list = field(default_factory=list)
+    target_formats: dict | list | str = field(default_factory=list)
     formats: dict = field(default_factory=dict)
     image_hosts: list = field(default_factory=lambda: ["mmbiz.qpic.cn"])
     enabled: bool = False
@@ -51,6 +61,11 @@ class Settings:
         if not isinstance(self.targets, (list, tuple)) or any(not isinstance(t, str) or len(t.split(":", 2)) != 3 or not all(t.split(":", 2)) for t in self.targets):
             raise ValueError("targets 必须为完整 unified_msg_origin 字符串列表")
         self.targets = tuple(dict.fromkeys(self.targets))
+        if isinstance(self.target_formats, str):
+            try:
+                self.target_formats = json.loads(self.target_formats)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"target_formats 必须是有效 JSON：第 {exc.lineno} 行第 {exc.colno} 列；无覆盖项请填 []") from exc
         if isinstance(self.target_formats, list):
             mappings = {}
             for entry in self.target_formats:

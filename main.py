@@ -10,7 +10,7 @@ from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-from .core import ApiError, Engine, HttpClient, Settings, Store
+from .core import ApiError, Engine, HttpClient, Settings, Store, upgrade_config
 from .formats import Output, daily_output, load_image
 from .hot import HotService
 
@@ -18,7 +18,12 @@ from .hot import HotService
 class WorkspacePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
-        self.settings = Settings(**{k: config[k] for k in Settings.__dataclass_fields__ if k in config})
+        updated = upgrade_config(config)
+        self.settings = Settings(**{k: updated[k] for k in Settings.__dataclass_fields__ if k in updated})
+        # Validate before persisting; AstrBot's writer atomically replaces its file.
+        # No API call or delivery is involved in this configuration-only migration.
+        if updated != dict(config):
+            config.save_config(replace_config=updated)
         self.task = None
         self.session = None
         self.store = None
