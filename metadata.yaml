@@ -1,0 +1,7 @@
+name: astrbot_plugin_60s
+display_name: 60s 日更与热门榜单
+desc: 日更定时推送与24类热榜命令查询；定时默认关闭，支持接口独立消息格式。
+version: v0.2.0
+author: YuriLunaSugar
+repo: https://github.com/YuriLunaSugar/astrbot_plugin_60s
+astrbot_version: ">=4.29.4,<5"

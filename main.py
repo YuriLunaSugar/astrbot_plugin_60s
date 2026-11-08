@@ -1,0 +1,120 @@
+"""AstrBot commands and opt-in scheduled delivery."""
+import asyncio
+import base64
+from contextlib import suppress
+from datetime import UTC, datetime
+from pathlib import Path
+
+from astrbot.api import AstrBotConfig, logger
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+from astrbot.api.star import Context, Star
+from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+
+from .core import ApiError, Engine, HttpClient, Settings, Store
+from .formats import Output, daily_output, load_image
+from .hot import HotService
+
+
+class WorkspacePlugin(Star):
+    def __init__(self, context: Context, config: AstrBotConfig):
+        super().__init__(context)
+        self.settings = Settings(**{k: config[k] for k in Settings.__dataclass_fields__ if k in config})
+        self.task = None
+        self.session = None
+        self.store = None
+        self.closed = False
+        self.queries = set()
+        self.hot = HotService(self._fetch_hot, self.settings.formats, self.settings.timeout_seconds)
+
+    def _client(self):
+        if self.closed:
+            raise ApiError("插件已停用")
+        if self.session is None:
+            import aiohttp
+            self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.settings.timeout_seconds))
+        return HttpClient(self.settings, self.session)
+
+    async def _fetch_hot(self, path):
+        return await self._client().fetch_path(path)
+
+    async def _prepare(self, kind, payload, source, text):
+        return await daily_output(kind, payload, source, text, self.settings.formats.get(kind, "text"), self._load_image)
+
+    async def _load_image(self, url):
+        self._client()
+        return await load_image(self.session, url, self.settings.image_hosts)
+
+    async def initialize(self):
+        if self.task is not None or not self.settings.enabled or not self.settings.targets:
+            return
+        path = Path(get_astrbot_data_path()) / "plugin_data" / "astrbot_plugin_60s"
+        path.mkdir(parents=True, exist_ok=True)
+        self.store = Store(path / "deliveries.sqlite3")
+        try:
+            client = self._client()
+            self.engine = Engine(self.settings, self.store, client, self._send, logger.warning, self._prepare)
+            self.task = asyncio.create_task(self._run(), name="astrbot-60s-daily")
+        except Exception:
+            await self.terminate()
+            raise
+
+    @staticmethod
+    def _components(output):
+        from astrbot.api.message_components import Image, Plain
+        if isinstance(output, str):
+            output = Output(output)
+        parts = [Plain(output.text)]
+        if output.image is not None:
+            parts.append(Image.fromBase64(base64.b64encode(output.image).decode("ascii")))
+        return parts
+
+    async def _send(self, target, output):
+        chain = MessageChain()
+        chain.chain = self._components(output)
+        return await self.context.send_message(target, chain)
+
+    @filter.command("热榜")
+    async def hot_command(self, event: AstrMessageEvent, source: str = "帮助", argument: str = "", count: str = ""):
+        """查询热门榜单：热榜 榜单 [条数]；网易云详情另需榜单ID。"""
+        if self.closed:
+            return
+        task = asyncio.create_task(self.hot.query(source, argument, count))
+        self.queries.add(task)
+        try:
+            output = await task
+            yield event.chain_result(self._components(output))
+        except (ApiError, ValueError) as exc:
+            yield event.plain_result(str(exc))
+        except Exception:
+            logger.exception("热榜查询异常")
+            yield event.plain_result("热榜查询失败，请稍后重试或联系管理员检查配置")
+        finally:
+            self.queries.discard(task)
+
+    async def _run(self):
+        while True:
+            try:
+                await self.engine.tick(datetime.now(UTC))
+            except Exception:
+                logger.exception("60s 调度停止，请检查存储和配置后重载插件")
+                return
+            await asyncio.sleep(30)
+
+    async def terminate(self):
+        self.closed = True
+        if self.task is not None:
+            self.task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self.task
+            self.task = None
+        queries = list(self.queries)
+        for task in queries:
+            task.cancel()
+        await asyncio.gather(*queries, return_exceptions=True)
+        self.queries.clear()
+        if self.session is not None:
+            await self.session.close()
+            self.session = None
+        if self.store is not None:
+            self.store.close()
+            self.store = None

@@ -1,0 +1,42 @@
+{
+  "enabled": false,
+  "base_url": "https://60s.viki.moe",
+  "timezone": "Asia/Shanghai",
+  "send_time": "09:00",
+  "targets": [],
+  "daily_enabled": true,
+  "history_enabled": true,
+  "catchup_minutes": 120,
+  "timeout_seconds": 20,
+  "image_hosts": [
+    "mmbiz.qpic.cn"
+  ],
+  "formats": {
+    "daily": "text",
+    "history": "text",
+    "douyin": "text",
+    "ithome": "text",
+    "rednote": "text",
+    "bili": "text",
+    "weibo": "text",
+    "quark": "text",
+    "baidu": "text",
+    "baidu_tv": "text",
+    "tieba": "text",
+    "toutiao": "text",
+    "zhihu": "text",
+    "dongchedi": "text",
+    "ncm_list": "text",
+    "ncm_detail": "text",
+    "hn": "text",
+    "maoyan_all": "text",
+    "maoyan_movie": "text",
+    "maoyan_tv": "text",
+    "maoyan_web": "text",
+    "douban_movie": "text",
+    "douban_tv_cn": "text",
+    "douban_tv_global": "text",
+    "douban_show_cn": "text",
+    "douban_show_global": "text"
+  }
+}

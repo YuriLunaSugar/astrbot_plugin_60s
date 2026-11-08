@@ -1,0 +1,321 @@
+{
+  "enabled": {
+    "type": "bool",
+    "default": false,
+    "description": "启用主动发送（确认目标后手动开启）"
+  },
+  "base_url": {
+    "type": "string",
+    "default": "https://60s.viki.moe",
+    "description": "60s 服务基址，不含 /v2 路径"
+  },
+  "timezone": {
+    "type": "string",
+    "default": "Asia/Shanghai",
+    "description": "IANA 时区"
+  },
+  "send_time": {
+    "type": "string",
+    "default": "09:00",
+    "description": "每天发送时间 HH:MM"
+  },
+  "targets": {
+    "type": "list",
+    "default": [],
+    "description": "完整 unified_msg_origin 列表，不是 API URL、适配器名称或裸群号"
+  },
+  "daily_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "启用每天60秒读懂世界"
+  },
+  "history_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "启用历史上的今天"
+  },
+  "catchup_minutes": {
+    "type": "int",
+    "default": 120,
+    "description": "当天错过计划后允许补发的分钟数，1–1440，不跨日补发"
+  },
+  "timeout_seconds": {
+    "type": "int",
+    "default": 20,
+    "description": "HTTP 和单次发送超时秒数，1–120"
+  },
+  "formats": {
+    "type": "object",
+    "description": "各接口发送格式（API 始终取 JSON，插件按选项发送）",
+    "items": {
+      "daily": {
+        "type": "string",
+        "description": "每天60秒发送格式",
+        "default": "text",
+        "options": [
+          "text",
+          "json",
+          "markdown",
+          "image"
+        ]
+      },
+      "history": {
+        "type": "string",
+        "description": "历史上的今天发送格式",
+        "default": "text",
+        "options": [
+          "text",
+          "json",
+          "markdown"
+        ]
+      },
+      "douyin": {
+        "type": "string",
+        "description": "抖音发送格式",
+        "default": "text",
+        "options": [
+          "text",
+          "json",
+          "markdown"
+        ]
+      },
+      "ithome": {
+        "type": "string",
+        "description": "IT之家发送格式",
+        "default": "text",
+        "options": [
+          "text",
+          "json",
+          "markdown"
+        ]
+      },
+      "rednote": {
+        "type": "string",
+        "description": "小红书发送格式",
+        "default": "text",
+        "options": [
+          "text",
+          "json",
+          "markdown"
+        ]
+      },
+      "bili": {
+        "type": "string",
+        "description": "哔哩哔哩发送格式",
+        "default": "text",
+        "options": [
+          "text",
+          "json",
+          "markdown"
+        ]
+      },
+      "weibo": {
+        "type": "string",
+        "description": "微博发送格式",
+        "default": "text",
+        "options": [
+          "text",
+          "json",
+          "markdown"
+        ]
+      },
+      "quark": {
+        "type": "string",
+        "description": "夸克发送格式",
+        "default": "text",
+        "options": [
+          "text",
+          "json",
+          "markdown"
+        ]
+      },
+      "baidu": {
+        "type": "string",
+        "description": "百度发送格式",
+        "default": "text",
+        "options": [
+          "text",
+          "json",
+          "markdown"
+        ]
+      },
+      "baidu_tv": {
+        "type": "string",
+        "description": "百度电视剧发送格式",
+        "default": "text",
+        "options": [
+          "text",
+          "json",
+          "markdown"
+        ]
+      },
+      "tieba": {
+        "type": "string",
+        "description": "贴吧发送格式",
+        "default": "text",
+        "options": [
+          "text",
+          "json",
+          "markdown"
+        ]
+      },
+      "toutiao": {
+        "type": "string",
+        "description": "头条发送格式",
+        "default": "text",
+        "options": [
+          "text",
+          "json",
+          "markdown"
+        ]
+      },
+      "zhihu": {
+        "type": "string",
+        "description": "知乎发送格式",
+        "default": "text",
+        "options": [
+          "text",
+          "json",
+          "markdown"
+        ]
+      },
+      "dongchedi": {
+        "type": "string",
+        "description": "懂车帝发送格式",
+        "default": "text",
+        "options": [
+          "text",
+          "json",
+          "markdown"
+        ]
+      },
+      "ncm_list": {
+        "type": "string",
+        "description": "网易云榜单发送格式",
+        "default": "text",
+        "options": [
+          "text",
+          "json",
+          "markdown"
+        ]
+      },
+      "ncm_detail": {
+        "type": "string",
+        "description": "网易云详情发送格式",
+        "default": "text",
+        "options": [
+          "text",
+          "json",
+          "markdown"
+        ]
+      },
+      "hn": {
+        "type": "string",
+        "description": "HackerNews发送格式",
+        "default": "text",
+        "options": [
+          "text",
+          "json",
+          "markdown"
+        ]
+      },
+      "maoyan_all": {
+        "type": "string",
+        "description": "猫眼总票房发送格式",
+        "default": "text",
+        "options": [
+          "text",
+          "json",
+          "markdown"
+        ]
+      },
+      "maoyan_movie": {
+        "type": "string",
+        "description": "猫眼电影发送格式",
+        "default": "text",
+        "options": [
+          "text",
+          "json",
+          "markdown"
+        ]
+      },
+      "maoyan_tv": {
+        "type": "string",
+        "description": "猫眼电视发送格式",
+        "default": "text",
+        "options": [
+          "text",
+          "json",
+          "markdown"
+        ]
+      },
+      "maoyan_web": {
+        "type": "string",
+        "description": "猫眼网剧发送格式",
+        "default": "text",
+        "options": [
+          "text",
+          "json",
+          "markdown"
+        ]
+      },
+      "douban_movie": {
+        "type": "string",
+        "description": "豆瓣电影发送格式",
+        "default": "text",
+        "options": [
+          "text",
+          "json",
+          "markdown"
+        ]
+      },
+      "douban_tv_cn": {
+        "type": "string",
+        "description": "豆瓣华语剧发送格式",
+        "default": "text",
+        "options": [
+          "text",
+          "json",
+          "markdown"
+        ]
+      },
+      "douban_tv_global": {
+        "type": "string",
+        "description": "豆瓣全球剧发送格式",
+        "default": "text",
+        "options": [
+          "text",
+          "json",
+          "markdown"
+        ]
+      },
+      "douban_show_cn": {
+        "type": "string",
+        "description": "豆瓣华语综艺发送格式",
+        "default": "text",
+        "options": [
+          "text",
+          "json",
+          "markdown"
+        ]
+      },
+      "douban_show_global": {
+        "type": "string",
+        "description": "豆瓣全球综艺发送格式",
+        "default": "text",
+        "options": [
+          "text",
+          "json",
+          "markdown"
+        ]
+      }
+    }
+  },
+  "image_hosts": {
+    "type": "list",
+    "default": [
+      "mmbiz.qpic.cn"
+    ],
+    "description": "日报图片允许的 HTTPS 域名（精确匹配，不允许重定向）"
+  }
+}
