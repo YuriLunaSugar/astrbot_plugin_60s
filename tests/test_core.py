@@ -72,16 +72,16 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         await self.engine.tick(self.now + timedelta(minutes=15))
         self.assertEqual(self.send.await_count, 2)
 
-    async def test_rate_limit_shared_cooldown(self):
+    async def test_rate_limit_each_interface_cooldown(self):
         self.client.fetch.side_effect = ApiError("429", 3600)
         await self.engine.tick(self.now)
         await self.engine.tick(self.now + timedelta(minutes=30))
-        self.assertEqual(self.client.fetch.await_count, 1)
+        self.assertEqual(self.client.fetch.await_count, 2)
         self.send.assert_not_awaited()
 
     async def test_timeout_and_http_failure(self):
         for exc in (TimeoutError(), ApiError("HTTP 503"), ValueError("bad json")):
-            self.engine.next_fetch = 0
+            self.engine.next_fetch = {}
             self.client.fetch.side_effect = exc
             await self.engine.tick(self.now)
         self.send.assert_not_awaited()
@@ -132,3 +132,97 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         first = datetime(2026, 11, 1, 5, 30, tzinfo=UTC)
         second = datetime(2026, 11, 1, 6, 30, tzinfo=UTC)
         self.assertEqual(s.due_day(first), s.due_day(second))
+
+
+    async def test_stale_daily_retries_history_on_time_and_recovers_once(self):
+        attempts = 0
+        def fetch(kind):
+            nonlocal attempts
+            if kind == "history":
+                return history()
+            attempts += 1
+            return daily("2026-11-07" if attempts < 3 else "2026-11-08")
+        self.client.fetch.side_effect = fetch
+        await self.engine.tick(self.now)
+        self.assertEqual(self.send.await_count, 2)
+        self.assertTrue(all("历史上的今天" in c.args[1] for c in self.send.await_args_list))
+        for minutes in (1, 15, 16, 30, 31, 119):
+            await self.engine.tick(self.now + timedelta(minutes=minutes))
+        self.assertEqual(attempts, 3)
+        self.assertEqual(self.client.fetch.await_count, 4)
+        self.assertEqual(self.send.await_count, 4)
+        self.assertNotIn("daily", self.engine.last_error)
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM deliveries WHERE status='sent'").fetchone()[0], 4)
+
+    async def test_daily_429_preserves_other_interface_and_cross_day_deadline(self):
+        def limited(kind):
+            if kind == "daily":
+                raise ApiError("HTTP 429", 27 * 3600)
+            return history()
+        self.client.fetch.side_effect = limited
+        await self.engine.tick(self.now)
+        self.assertEqual(self.send.await_count, 2)
+        self.assertIn("daily", self.engine.last_error)
+        next_day = history()
+        next_day["data"]["date"] = "11-9"
+        self.client.fetch.side_effect = lambda kind: daily("2026-11-09") if kind == "daily" else next_day
+        await self.engine.tick(self.now + timedelta(days=1))
+        self.assertEqual(self.send.await_count, 4)
+        self.assertEqual([c.args[0] for c in self.client.fetch.await_args_list].count("daily"), 1)
+        await self.engine.tick(self.now + timedelta(days=1, hours=3))
+        self.assertEqual(self.send.await_count, 4)
+
+    async def test_history_429_does_not_block_daily(self):
+        def limited(kind):
+            if kind == "history":
+                raise ApiError("HTTP 429", 3600)
+            return daily()
+        self.client.fetch.side_effect = limited
+        await self.engine.tick(self.now)
+        self.assertEqual(self.send.await_count, 2)
+        self.assertTrue(all("每天60秒" in c.args[1] for c in self.send.await_args_list))
+        self.client.fetch.side_effect = lambda kind: history()
+        await self.engine.tick(self.now + timedelta(minutes=59))
+        self.assertEqual(self.client.fetch.await_count, 2)
+        await self.engine.tick(self.now + timedelta(hours=1))
+        self.assertEqual(self.send.await_count, 4)
+        self.assertNotIn("history", self.engine.last_error)
+
+    async def test_new_day_and_exclusive_window_boundary(self):
+        self.client.fetch.side_effect = lambda kind: daily("2026-11-07") if kind == "daily" else history()
+        await self.engine.tick(self.now)
+        self.assertEqual(self.send.await_count, 2)
+        self.client.fetch.side_effect = lambda kind: daily() if kind == "daily" else history()
+        await self.engine.tick(self.now + timedelta(hours=2))
+        self.assertEqual(self.client.fetch.await_count, 2)
+        next_history = history()
+        next_history["data"]["date"] = "11-9"
+        self.client.fetch.side_effect = lambda kind: daily("2026-11-09") if kind == "daily" else next_history
+        await self.engine.tick(self.now + timedelta(days=1))
+        await self.engine.tick(self.now + timedelta(days=1, minutes=1))
+        self.assertEqual(self.send.await_count, 6)
+        self.assertEqual(self.client.fetch.await_count, 4)
+
+    async def test_slow_daily_does_not_delay_history(self):
+        daily_started = asyncio.Event()
+        release_daily = asyncio.Event()
+        history_sent = asyncio.Event()
+        async def fetch(kind):
+            if kind == "daily":
+                daily_started.set()
+                await release_daily.wait()
+                return daily()
+            return history()
+        async def send(target, text):
+            if "历史上的今天" in text:
+                history_sent.set()
+        self.client.fetch.side_effect = fetch
+        self.send.side_effect = send
+        task = asyncio.create_task(self.engine.tick(self.now))
+        try:
+            await asyncio.wait_for(daily_started.wait(), 1)
+            await asyncio.wait_for(history_sent.wait(), 1)
+        finally:
+            release_daily.set()
+            await task
+        self.assertEqual(self.send.await_count, 4)

@@ -164,7 +164,8 @@ class Engine:
         self.send, self.log = send, log
         self.prepare = prepare
         self.cache = {}
-        self.next_fetch = 0
+        self.next_fetch = {}
+        self.last_error = {}
         self.lock = asyncio.Lock()
 
     async def tick(self, now):
@@ -174,34 +175,65 @@ class Engine:
             if not s.enabled or not s.targets or day is None:
                 return
             self.cache = {k: v for k, v in self.cache.items() if k[0] == day}
-            for kind, enabled in (("daily", s.daily_enabled), ("history", s.history_enabled)):
-                pending = [t for t in s.targets if not self.store.has(day, t, kind)]
-                if not enabled or not pending:
-                    continue
-                key = (day, kind)
-                if key not in self.cache:
-                    if now.timestamp() < self.next_fetch:
-                        continue
-                    try:
-                        payload = await asyncio.wait_for(self.client.fetch(kind), s.timeout_seconds)
-                        source, text = render(kind, payload, day)
-                        if self.prepare is not None:
-                            text = await asyncio.wait_for(self.prepare(kind, payload, source, text), s.timeout_seconds)
-                        self.cache[key] = source, text
-                    except Exception as exc:
-                        self.next_fetch = now.timestamp() + max(900, getattr(exc, "retry_after", 900))
-                        self.log(f"{kind} 获取失败: {exc}")
-                        continue
-                source, text = self.cache[key]
-                for target in pending:
-                    if not self.store.claim(day, target, kind, source):
-                        continue
-                    try:
-                        result = await asyncio.wait_for(self.send(target, text), s.timeout_seconds)
-                        if result is False:
-                            raise RuntimeError("适配器返回 False")
-                    except Exception as exc:
-                        self.store.finish(day, target, kind, "failed_or_unknown")
-                        self.log(f"{kind} 发送失败或结果未知，不自动重发: {type(exc).__name__}")
-                    else:
-                        self.store.finish(day, target, kind, "sent")
+            tasks = [
+                asyncio.create_task(self._deliver_kind(kind, day, now))
+                for kind, enabled in (
+                    ("daily", s.daily_enabled),
+                    ("history", s.history_enabled),
+                )
+                if enabled
+            ]
+            try:
+                await asyncio.gather(*tasks)
+            except BaseException:
+                # On unload or storage failure, finish all children before closing DB.
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
+
+    async def _deliver_kind(self, kind, day, now):
+        s = self.settings
+        pending = [t for t in s.targets if not self.store.has(day, t, kind)]
+        if not pending:
+            return
+        key = (day, kind)
+        if key not in self.cache:
+            if now.timestamp() < self.next_fetch.get(kind, 0):
+                return
+            try:
+                payload = await asyncio.wait_for(
+                    self.client.fetch(kind), s.timeout_seconds
+                )
+                source, text = render(kind, payload, day)
+                if self.prepare is not None:
+                    text = await asyncio.wait_for(
+                        self.prepare(kind, payload, source, text), s.timeout_seconds
+                    )
+                self.cache[key] = source, text
+            except Exception as exc:
+                self.next_fetch[kind] = now.timestamp() + max(
+                    900, getattr(exc, "retry_after", 900)
+                )
+                self.last_error[kind] = str(exc)
+                self.log(f"{kind} 获取失败: {exc}")
+                return
+            self.next_fetch.pop(kind, None)
+            self.last_error.pop(kind, None)
+        source, text = self.cache[key]
+        for target in pending:
+            if not self.store.claim(day, target, kind, source):
+                continue
+            try:
+                result = await asyncio.wait_for(
+                    self.send(target, text), s.timeout_seconds
+                )
+                if result is False:
+                    raise RuntimeError("适配器返回 False")
+            except Exception as exc:
+                self.store.finish(day, target, kind, "failed_or_unknown")
+                self.log(
+                    f"{kind} 发送失败或结果未知，不自动重发: {type(exc).__name__}"
+                )
+            else:
+                self.store.finish(day, target, kind, "sent")
