@@ -2,7 +2,7 @@
 
 Run: python3 tests/check_upstream_config_contract.py /path/to/reference-directory
 Reference directory contains astrbot_config.py, TemplateListEditor.vue,
-ConfigItemRenderer.vue, AstrBotConfig.vue fetched verbatim from v4.29.4.
+ConfigItemRenderer.vue, AstrBotConfig.vue, config_service.py fetched verbatim from v4.29.4.
 Executes actual backend class and JS handlers, NOT a browser/DOM/WebUI test.
 No AstrBot process starts, and all writes are in TemporaryDirectory.
 """
@@ -30,52 +30,81 @@ namespace = dict(globals(), ASTRBOT_CONFIG_PATH='', DEFAULT_CONFIG={},
                  DASHBOARD_RESET_PASSWORD_ENV='ASTRBOT_60S_TEST_UNUSED_PASSWORD_RESET', logger=logging.getLogger('contract'))
 exec(compile(ast.Module(body=[class_node], type_ignores=[]), str(reference / 'astrbot_config.py'), 'exec'), namespace)
 Config = namespace['AstrBotConfig']
+# Execute the official Dashboard validator as well as the file loader/writer.
+from typing import Any
+service_tree = ast.parse((reference / 'config_service.py').read_text())
+functions = [n for n in service_tree.body if isinstance(n, ast.FunctionDef) and
+             n.name in ('try_cast', '_expect_type', '_validate_template_list', 'validate_config')]
+namespace['Any'] = Any
+exec(compile(ast.Module(body=functions, type_ignores=[]), str(reference / 'config_service.py'), 'exec'), namespace)
+validate_config = namespace['validate_config']
 with tempfile.TemporaryDirectory() as tmp:
     path = Path(tmp) / 'plugin.json'
-    target = 'example_bot:GroupMessage:demo_group_A'
-    original = {'targets': [target], 'target_formats': {target: {'daily': 'image', 'history': 'json'}},
-                'send_time': '08:15', 'catchup_minutes': 37, 'formats': {'daily': 'markdown', 'history': 'text', 'weibo': 'json'},
-                'schedules': {'history': {'send_time': '10:00', 'end_time': '11:30', 'retry_minutes': 8}}}
-    path.write_text(json.dumps(original))
-    config = Config(str(path), schema=schema)
-    # AstrBot retains the mismatched old mapping even when the schema default is [] or text.
-    assert isinstance(config['target_formats'], dict)
-    updated = upgrade_config(config)
-    Settings(**updated)  # Validate before saving, just as plugin initialization does.
-    config.save_config(replace_config=updated)
-    reloaded = Config(str(path), schema=schema)
-    assert json.loads(reloaded['target_formats']) == original['target_formats']
-    for key in ('send_time', 'catchup_minutes', 'formats'):
-        assert reloaded[key] == original[key]
-    assert reloaded['schedules']['history'] == original['schedules']['history']
-    assert Settings(**reloaded).format_for('daily', target) == 'image'
-    assert upgrade_config(reloaded) == reloaded
-    print('PASS: actual AstrBotConfig load/save/reload retains legacy values and new JSON text')
+    a = 'example_bot:GroupMessage:demo_group_A'
+    b = 'example_bot:FriendMessage:demo_user_B'
+    for overrides in ({a: {'daily': 'image', 'history': 'json'}},
+                      [{'target':a,'daily':'image','history':'json','__template_key':'target'}],
+                      json.dumps({a:{'daily':'image','history':'json'}})):
+        original = {'targets': [a,b], 'target_formats': overrides,
+                    'send_time': '08:15', 'catchup_minutes': 37,
+                    'formats': {'daily': 'markdown', 'history': 'text', 'weibo': 'json'},
+                    'schedules': {'history': {'send_time': '10:00', 'end_time': '11:30', 'retry_minutes': 8}}}
+        path.write_text(json.dumps(original))
+        config = Config(str(path), schema=schema)
+        assert config['target_formats'] == overrides  # Not erased before plugin initialization.
+        updated = upgrade_config(config)
+        Settings(**updated)
+        errors, validated = validate_config(copy.deepcopy(updated), schema, False)
+        assert not errors, errors
+        config.save_config(replace_config=validated)
+        reloaded = Config(str(path), schema=schema)
+        for key in ('targets', 'send_time', 'catchup_minutes', 'formats'):
+            assert reloaded[key] == original[key]
+        assert reloaded['schedules']['history'] == original['schedules']['history']
+        settings = Settings(**reloaded)
+        assert settings.targets == (a,b)
+        assert settings.format_for('daily',a) == 'image'
+        assert settings.format_for('daily',b) == 'markdown'
+        assert settings.retry_seconds('history',a) == 480
+        assert reloaded['destinations'][1]['daily_legacy_window_minutes'] == 37
+        assert upgrade_config(reloaded) == reloaded
+        reloaded['destinations'] = []
+        reloaded.save_config()
+        emptied = upgrade_config(Config(str(path), schema=schema))
+        assert Settings(**emptied).targets == ()
+        assert emptied['targets'] == [a,b]
+    print('PASS: actual AstrBot loader/validator/save/reload, three legacy formats, full target migration and no resurrection')
 
 vue = (reference / 'TemplateListEditor.vue').read_text()
 def function(name):
     start = vue.index('function ' + name + '(')
     end = vue.find('\nfunction ', start + 1)
     return vue[start:end]
-# Use the upstream handlers unchanged, with only their component state supplied.
-script = '''const assert = require('node:assert/strict');
-const props = {modelValue: {}, templates: {target: {items: {target: {type:'string', default:''}}}}};
-const defaultValueMap = {}; const expandedEntries = {value:{}};
-let emitted; const emit = (event, value) => { emitted = value; };
-''' + function('buildDefaults') + '\n' + function('addEntry') + '''
-assert.throws(() => addEntry('target'), /not iterable/);
-props.modelValue = []; addEntry('target');
-assert.deepEqual(emitted, [{__template_key:'target',target:''}]);
-console.log('PASS: actual upstream addEntry rejects legacy mapping, accepts array');
-'''
-subprocess.run(['node', '-e', script], check=True)
-# Source route evidence, explicitly not proof of Vuetify rendering or menu interaction.
-renderer = (reference / 'ConfigItemRenderer.vue').read_text()
-assert schema['target_formats']['type'] == 'text'
-assert "v-else-if=\"itemMeta?.type === 'text'\"" in renderer
-assert '<v-textarea' in renderer
-parent = (reference / 'AstrBotConfig.vue').read_text()
+# Actual upstream new-entry handlers, with the real plugin schema supplied.
+script = "const props = {modelValue: [], templates:" + json.dumps(schema['destinations']['templates']) + "};\n" + '''
+const defaultValueMap={}; const expandedEntries={value:{}};
+let emitted; const emit=(event,value)=>{emitted=value};
+''' + function('buildDefaults') + '\n' + function('addEntry') + "\naddEntry('target'); console.log(JSON.stringify(emitted));"
+entries=json.loads(subprocess.check_output(['node','-e',script],text=True))
+assert len(entries)==1 and entries[0]['target']==''
+assert entries[0]['daily']=='image' and entries[0]['history']=='text'
+assert entries[0]['daily_send_time']=='09:00' and entries[0]['history_end_time']=='11:00'
+try:
+    Settings(destinations=entries)
+    raise AssertionError('blank UMO accepted')
+except ValueError:
+    pass
+entries[0]['target']='example_bot:GroupMessage:demo_group_A'
+assert not Settings(destinations=entries).enabled
+errors,_=validate_config({'destinations':entries},schema,False)
+assert not errors,errors
+print('PASS: actual TemplateListEditor new entry uses image/text and per-target schedule defaults, validates through Dashboard')
+
+renderer=(reference / 'ConfigItemRenderer.vue').read_text()
+parent=(reference / 'AstrBotConfig.vue').read_text()
+assert "itemMeta?._special === 'umo'" in renderer and 'v-else-if="itemMeta?.options"' in renderer
 assert '!metadata[metadataKey].items[key]?.invisible' in parent
-for key in ('send_time', 'catchup_minutes', 'formats'):
+for key in ('targets','target_formats','send_time','catchup_minutes','formats','daily_enabled','history_enabled','schedules','destinations_migrated'):
     assert schema[key]['invisible'] is True
-print('PASS: source routes text to textarea and excludes hidden compatibility fields; DOM NOT tested')
+assert schema['destinations']['type']=='template_list'
+print('PASS: source routes UMO/dropdowns and excludes old fields; DOM and browser interaction NOT tested')

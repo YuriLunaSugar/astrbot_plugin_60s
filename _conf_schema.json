@@ -23,20 +23,23 @@
   "targets": {
     "type": "list",
     "default": [],
-    "description": "定时发送目标列表（完整 UMO）",
+    "description": "旧目标列表（仅迁移保留）",
     "_special": "umo",
     "obvious_hint": true,
-    "hint": "填写例子（全部虚构，必须替换）：example_bot:GroupMessage:demo_group_A；example_bot:FriendMessage:demo_user_B。每项填写一个完整 UMO，不是裸群号或 API URL。点击会话选择器可选择 AstrBot 已记录会话；或从实际消息事件 event.unified_msg_origin 取得完整标识。不要根据示例猜平台实例 ID；在目标格式列表中使用完全相同的 UMO。默认空列表不会发送。"
+    "hint": "填写例子（全部虚构，必须替换）：example_bot:GroupMessage:demo_group_A；example_bot:FriendMessage:demo_user_B。每项填写一个完整 UMO，不是裸群号或 API URL。点击会话选择器可选择 AstrBot 已记录会话；或从实际消息事件 event.unified_msg_origin 取得完整标识。不要根据示例猜平台实例 ID；在目标格式列表中使用完全相同的 UMO。默认空列表不会发送。",
+    "invisible": true
   },
   "daily_enabled": {
     "type": "bool",
     "default": true,
-    "description": "启用每天60秒读懂世界"
+    "description": "启用每天60秒读懂世界",
+    "invisible": true
   },
   "history_enabled": {
     "type": "bool",
     "default": true,
-    "description": "启用历史上的今天"
+    "description": "启用历史上的今天",
+    "invisible": true
   },
   "catchup_minutes": {
     "type": "int",
@@ -69,9 +72,10 @@
   "target_formats": {
     "type": "text",
     "default": "[]",
-    "description": "各目标日更格式（JSON 文本，直接编辑）",
+    "description": "旧目标格式（仅迁移保留）",
     "obvious_hint": true,
-    "hint": "直接编辑 JSON，无需点击添加条目。虚构例子：[{\"target\":\"example_bot:GroupMessage:demo_group_A\",\"daily\":\"image\",\"history\":\"text\"},{\"target\":\"example_bot:FriendMessage:demo_user_B\",\"daily\":\"markdown\",\"history\":\"json\"}]。每项 target 必须先在上方目标列表中启用，格式支持 text/json/markdown，只有 daily 支持 image。省略格式继承旧默认（新安装为 text）；无覆盖项填 []。旧字典或模板列表加载时无损转换，不能填写注释或尾逗号。"
+    "hint": "直接编辑 JSON，无需点击添加条目。虚构例子：[{\"target\":\"example_bot:GroupMessage:demo_group_A\",\"daily\":\"image\",\"history\":\"text\"},{\"target\":\"example_bot:FriendMessage:demo_user_B\",\"daily\":\"markdown\",\"history\":\"json\"}]。每项 target 必须先在上方目标列表中启用，格式支持 text/json/markdown，只有 daily 支持 image。省略格式继承旧默认（新安装为 text）；无覆盖项填 []。旧字典或模板列表加载时无损转换，不能填写注释或尾逗号。",
+    "invisible": true
   },
   "schedules": {
     "type": "object",
@@ -116,6 +120,115 @@
             "type": "string",
             "default": "",
             "description": "最后结束时间 HH:MM（含该时刻）；早于开始表示跨午夜；留空沿用旧补发窗口"
+          }
+        }
+      }
+    },
+    "invisible": true
+  },
+  "destinations_migrated": {
+    "type": "bool",
+    "default": false,
+    "invisible": true,
+    "description": "目标条目迁移完成标记，请勿修改"
+  },
+  "destinations": {
+    "type": "template_list",
+    "default": [],
+    "description": "发送目标与日更格式（每个目标一条）",
+    "obvious_hint": true,
+    "hint": "点击“添加条目”后，再点击菜单中的“点击这里新增一个发送目标”。在条目内选择 UMO，分别配置两个接口的格式和时间；格式选“关闭”则该目标不调度该接口。新条目默认日报图片、历史文本，09:00–11:00、间隔15分钟。删除全部条目后没有发送目标。",
+    "templates": {
+      "target": {
+        "name": "点击这里新增一个发送目标",
+        "display_item": "target",
+        "items": {
+          "target": {
+            "type": "string",
+            "default": "",
+            "_special": "umo",
+            "description": "目标会话 UMO",
+            "hint": "点击选择真实会话。虚构格式示例：example_bot:GroupMessage:demo_group_A。真实 UMO 可由 event.unified_msg_origin 获取；勿填裸群号。"
+          },
+          "daily": {
+            "type": "string",
+            "default": "image",
+            "options": [
+              "image",
+              "text",
+              "json",
+              "markdown",
+              "off"
+            ],
+            "description": "每天60秒发送格式",
+            "labels": [
+              "图片",
+              "纯文本",
+              "JSON 文本",
+              "Markdown 文本",
+              "关闭（不发送）"
+            ]
+          },
+          "daily_send_time": {
+            "type": "string",
+            "default": "09:00",
+            "description": "每天60秒：每天开始时间 HH:MM"
+          },
+          "daily_retry_minutes": {
+            "type": "int",
+            "default": 15,
+            "description": "每天60秒：未成功时等待分钟数（1–1440）"
+          },
+          "daily_end_time": {
+            "type": "string",
+            "default": "11:00",
+            "description": "每天60秒：最后结束时间 HH:MM（包含该时刻）",
+            "hint": "早于开始时间表示跨午夜；与开始时间不能相同。迁移的旧窗口可能为空，保留旧结束边界；填写明确结束时间后使用新规则。"
+          },
+          "daily_legacy_window_minutes": {
+            "type": "int",
+            "default": 0,
+            "invisible": true,
+            "description": "旧补发窗口兼容，请勿修改"
+          },
+          "history": {
+            "type": "string",
+            "default": "text",
+            "options": [
+              "text",
+              "json",
+              "markdown",
+              "off"
+            ],
+            "description": "历史上的今天发送格式（不支持图片）",
+            "labels": [
+              "纯文本",
+              "JSON 文本",
+              "Markdown 文本",
+              "关闭（不发送）"
+            ]
+          },
+          "history_send_time": {
+            "type": "string",
+            "default": "09:00",
+            "description": "历史上的今天：每天开始时间 HH:MM"
+          },
+          "history_retry_minutes": {
+            "type": "int",
+            "default": 15,
+            "description": "历史上的今天：未成功时等待分钟数（1–1440）"
+          },
+          "history_end_time": {
+            "type": "string",
+            "default": "11:00",
+            "description": "历史上的今天：最后结束时间 HH:MM（包含该时刻）",
+            "hint": "早于开始时间表示跨午夜；与开始时间不能相同。迁移的旧窗口可能为空，保留旧结束边界；填写明确结束时间后使用新规则。"
+          },
+          "history_legacy_window_minutes": {
+            "type": "int",
+            "default": 0,
+            "invisible": true,
+            "description": "旧补发窗口兼容，请勿修改"
           }
         }
       }

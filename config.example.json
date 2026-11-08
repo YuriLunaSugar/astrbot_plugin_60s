@@ -27,5 +27,7 @@
       "end_time": ""
     }
   },
-  "target_formats": "[]"
+  "target_formats": "[]",
+  "destinations": [],
+  "destinations_migrated": false
 }

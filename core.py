@@ -18,8 +18,28 @@ class ApiError(Exception):
 
 
 def upgrade_config(config):
-    """Keep legacy data intact while making it editable without a template menu."""
+    """Migrate the legacy allowlist once; never resurrect removed destinations."""
     updated = copy.deepcopy(dict(config))
+    if updated.get("destinations_migrated") is True:
+        return updated
+    legacy = Settings(**{k: updated[k] for k in Settings.__dataclass_fields__
+                         if k in updated and k not in ("destinations", "destinations_migrated")})
+    selected = Settings(destinations=updated.get("destinations", []))
+    entries = {target: {"__template_key": "target", "target": target,
+                       "daily": legacy.format_for("daily", target) if legacy.daily_enabled else "off",
+                       "history": legacy.format_for("history", target) if legacy.history_enabled else "off"}
+               for target in legacy.targets}
+    for entry in entries.values():
+        for kind in ("daily", "history"):
+            schedule = legacy.schedules.get(kind, {})
+            entry[f"{kind}_send_time"] = schedule.get("send_time") or legacy.send_time
+            entry[f"{kind}_retry_minutes"] = schedule.get("retry_minutes", 15)
+            entry[f"{kind}_end_time"] = schedule.get("end_time") or ""
+            entry[f"{kind}_legacy_window_minutes"] = legacy.catchup_minutes if not schedule.get("end_time") else 0
+    for target in selected.targets:
+        entries[target] = selected.normalized_destinations[target]
+    updated["destinations"] = list(entries.values())
+    updated["destinations_migrated"] = True
     value = updated.get("target_formats")
     if isinstance(value, (dict, list)):
         updated["target_formats"] = json.dumps(value, ensure_ascii=False, indent=2)
@@ -28,6 +48,8 @@ def upgrade_config(config):
 
 @dataclass
 class Settings:
+    destinations: list | None = None
+    destinations_migrated: bool = False
     schedules: dict = field(default_factory=dict)
     target_formats: dict | list | str = field(default_factory=list)
     formats: dict = field(default_factory=dict)
@@ -43,6 +65,44 @@ class Settings:
     timeout_seconds: int = 20
 
     def __post_init__(self):
+        self.target_schedules = {}
+        self.normalized_destinations = {}
+        if type(self.destinations_migrated) is not bool:
+            raise ValueError("destinations_migrated 必须为布尔值")
+        if self.destinations is not None or self.destinations_migrated:
+            entries = self.destinations if self.destinations is not None else []
+            if not isinstance(entries, list):
+                raise ValueError("发送目标配置必须为条目列表")
+            mappings = {}
+            for index, entry in enumerate(entries, 1):
+                schedule_keys = {f"{k}_{f}" for k in ("daily", "history") for f in ("send_time", "retry_minutes", "end_time", "legacy_window_minutes")}
+                if not isinstance(entry, dict) or set(entry) - ({"target", "daily", "history", "__template_key"} | schedule_keys):
+                    raise ValueError(f"第 {index} 项目标配置字段无效")
+                if entry.get("__template_key", "target") != "target":
+                    raise ValueError(f"第 {index} 项使用未知模板")
+                target = entry.get("target")
+                parts = target.split(":", 2) if isinstance(target, str) else []
+                if (len(parts) != 3 or any(not p.strip() or p != p.strip() for p in parts)
+                        or target != target.strip() or parts[1] not in ("GroupMessage", "FriendMessage", "OtherMessage")):
+                    raise ValueError(f"第 {index} 项 UMO 无效：请选择完整会话，消息类型须为 GroupMessage/FriendMessage/OtherMessage")
+                if target in mappings:
+                    raise ValueError(f"第 {index} 项 UMO 重复，每个目标只能配置一次")
+                mappings[target] = {"daily": entry.get("daily", "image"), "history": entry.get("history", "text")}
+                normalized = {"__template_key": "target", "target": target, **mappings[target]}
+                self.target_schedules[target] = {}
+                for kind in ("daily", "history"):
+                    schedule = {key: entry.get(f"{kind}_{key}", default) for key, default in
+                                (("send_time", "09:00"), ("retry_minutes", 15), ("end_time", "11:00"), ("legacy_window_minutes", 0))}
+                    legacy_window = schedule["legacy_window_minutes"]
+                    if type(legacy_window) is not int or not 0 <= legacy_window <= 1440:
+                        raise ValueError("旧补发窗口须为 0–1440 分钟")
+                    if not schedule["send_time"] or (not schedule["end_time"] and not legacy_window):
+                        raise ValueError(f"第 {index} 项 {kind} 请填写开始和结束时间")
+                    self.target_schedules[target][kind] = schedule
+                    normalized.update({f"{kind}_{key}": value for key, value in schedule.items()})
+                self.normalized_destinations[target] = normalized
+            self.targets = tuple(mappings)
+            self.target_formats = mappings
         if not isinstance(self.formats, dict) or any(not isinstance(v, str) for v in self.formats.values()):
             raise ValueError("formats 必须为接口到发送格式的映射")
         if not isinstance(self.image_hosts, list) or any(not isinstance(h, str) or not h for h in self.image_hosts):
@@ -86,12 +146,13 @@ class Settings:
             if set(mapping) - {"daily", "history"}:
                 raise ValueError("目标格式仅支持 daily/history")
             for kind, fmt in mapping.items():
-                allowed = ("text", "json", "markdown", "image") if kind == "daily" else ("text", "json", "markdown")
+                allowed = ("text", "json", "markdown", "image", "off") if kind == "daily" else ("text", "json", "markdown", "off")
                 if fmt not in allowed:
                     raise ValueError(f"{kind} 不支持发送格式 {fmt}")
         if not isinstance(self.schedules, dict) or set(self.schedules) - {"daily", "history"}:
             raise ValueError("schedules 仅支持 daily/history")
-        for kind, schedule in self.schedules.items():
+        all_schedules = list(self.schedules.items()) + [(kind, schedule) for schedules in self.target_schedules.values() for kind, schedule in schedules.items()]
+        for kind, schedule in all_schedules:
             if not isinstance(schedule, dict):
                 raise ValueError("每个接口的调度必须为对象")
             for key in ("send_time", "end_time"):
@@ -107,13 +168,15 @@ class Settings:
     def format_for(self, kind, target):
         return self.target_formats.get(target, {}).get(kind, self.formats.get(kind, "text"))
 
-    def retry_seconds(self, kind):
-        return self.schedules.get(kind, {}).get("retry_minutes", 15) * 60
+    def retry_seconds(self, kind, target=None):
+        schedules = self.target_schedules[target] if target is not None else self.schedules
+        return schedules.get(kind, {}).get("retry_minutes", 15) * 60
 
-    def window(self, kind, now):
+    def window(self, kind, now, target=None):
         """Return schedule-day and inclusive end; old configs retain old boundaries."""
         local = now.astimezone(self.zone)
-        schedule = self.schedules.get(kind, {})
+        schedules = self.target_schedules[target] if target is not None else self.schedules
+        schedule = schedules.get(kind, {})
         start = schedule.get("send_time") or self.send_time
         end = schedule.get("end_time")
         hour, minute = map(int, start.split(":"))
@@ -121,7 +184,8 @@ class Settings:
             # Compatibility: original catchup window stops at midnight and excludes end.
             begin = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
             midnight = datetime.combine(local.date() + timedelta(days=1), datetime.min.time(), self.zone)
-            deadline = min(begin.timestamp() + self.catchup_minutes * 60, midnight.timestamp())
+            catchup = schedule.get("legacy_window_minutes") or self.catchup_minutes
+            deadline = min(begin.timestamp() + catchup * 60, midnight.timestamp())
             if begin.timestamp() <= now.timestamp() < deadline:
                 return local.date(), deadline - 0.000001
             return None
@@ -277,25 +341,74 @@ class Engine:
         self.last_error = {kind: error for kind, _, error in state if error}
         self.lock = asyncio.Lock()
 
-    def _cooldown(self, kind, current, error=None, retry_after=0):
-        deadline = current.timestamp() + max(self.settings.retry_seconds(kind), retry_after)
-        self.store.save_schedule_state(kind, deadline, error)
-        self.next_fetch[kind] = deadline
+    @staticmethod
+    def _state_key(kind, target):
+        return kind if target is None else json.dumps([target, kind], ensure_ascii=False)
+
+    def _cooldown(self, kind, current, error=None, retry_after=0, target=None):
+        key = self._state_key(kind, target)
+        deadline = current.timestamp() + max(self.settings.retry_seconds(kind, target), retry_after)
+        self.store.save_schedule_state(key, deadline, error)
+        self.next_fetch[key] = deadline
         if error:
-            self.last_error[kind] = error
+            self.last_error[key] = error
         else:
-            self.last_error.pop(kind, None)
+            self.last_error.pop(key, None)
+
+    async def _fetch_once(self, kind, now):
+        try:
+            return await self.client.fetch(kind)
+        except ApiError as exc:
+            if exc.retry_after:
+                deadline = (self.clock or (lambda: now))().timestamp() + exc.retry_after
+                key = "api:" + kind
+                self.store.save_schedule_state(key, deadline, str(exc))
+                self.next_fetch[key] = deadline
+            raise
+
+    async def _shared_fetch(self, kind, now):
+        key = ("fetch", kind)
+        if key not in self.round_tasks:
+            self.round_tasks[key] = asyncio.create_task(self._fetch_once(kind, now))
+        return await asyncio.shield(self.round_tasks[key])
+
+    async def _prepare_once(self, kind, payload, source, text, target, now, limit_key):
+        try:
+            return await self.prepare(kind, payload, source, text, target)
+        except ApiError as exc:
+            if exc.retry_after:
+                deadline = (self.clock or (lambda: now))().timestamp() + exc.retry_after
+                self.store.save_schedule_state(limit_key, deadline, str(exc))
+                self.next_fetch[limit_key] = deadline
+            raise
+
+    async def _shared_prepare(self, kind, payload, source, text, target, now):
+        fmt = self.settings.format_for(kind, target)
+        limit_key = "format:" + kind + ":" + fmt
+        remaining = self.next_fetch.get(limit_key, 0) - now.timestamp()
+        if remaining > 0:
+            raise ApiError("该格式仍在 Retry-After 等待期内", remaining)
+        key = ("prepare", kind, source, text, fmt)
+        if key not in self.round_tasks:
+            self.round_tasks[key] = asyncio.create_task(self._prepare_once(kind, payload, source, text, target, now, limit_key))
+        return await asyncio.shield(self.round_tasks[key])
 
     async def tick(self, now):
         async with self.lock:
             s = self.settings
             if not s.enabled or not s.targets:
                 return
+            self.round_tasks = {}
             tasks = []
-            for kind, enabled in (("daily", s.daily_enabled), ("history", s.history_enabled)):
-                window = s.window(kind, now)
-                if enabled and window:
-                    tasks.append(asyncio.create_task(self._deliver_kind(kind, window, now)))
+            scopes = s.targets if s.target_schedules else (None,)
+            for target in scopes:
+                for kind in ("daily", "history"):
+                    enabled = s.format_for(kind, target) != "off" if target is not None else getattr(s, kind + "_enabled")
+                    if not enabled:
+                        continue
+                    window = s.window(kind, now, target)
+                    if window:
+                        tasks.append(asyncio.create_task(self._deliver_kind(kind, window, now, target)))
             try:
                 await asyncio.gather(*tasks)
             except BaseException:
@@ -303,21 +416,30 @@ class Engine:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
                 raise
+            finally:
+                for task in self.round_tasks.values():
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*self.round_tasks.values(), return_exceptions=True)
 
-    async def _deliver_kind(self, kind, window, now):
+    async def _deliver_kind(self, kind, window, now, scope_target=None):
         s = self.settings
         day, end = window
         current = self.clock or (lambda: now)
-        pending = [t for t in s.targets if self.store.eligible(day, t, kind)]
-        if not pending or current().timestamp() > end or current().timestamp() < self.next_fetch.get(kind, 0):
+        targets = (scope_target,) if scope_target is not None else s.targets
+        key = self._state_key(kind, scope_target)
+        pending = [t for t in targets if self.store.eligible(day, t, kind)]
+        # Retain legacy per-interface cooldowns during the first upgrade as well.
+        deadline = max(self.next_fetch.get(key, 0), self.next_fetch.get(kind, 0), self.next_fetch.get("api:" + kind, 0))
+        if not pending or current().timestamp() > end or current().timestamp() < deadline:
             return
         # Persist a retry reservation before I/O so restart doesn't cause a tight loop.
-        self._cooldown(kind, current())
+        self._cooldown(kind, current(), target=scope_target)
         try:
-            payload = await asyncio.wait_for(self.client.fetch(kind), s.timeout_seconds)
+            payload = await asyncio.wait_for(self._shared_fetch(kind, now), s.timeout_seconds)
             source, text = render(kind, payload, day)
         except Exception as exc:
-            self._cooldown(kind, current(), str(exc), getattr(exc, "retry_after", 0))
+            self._cooldown(kind, current(), str(exc), getattr(exc, "retry_after", 0), scope_target)
             self.log(f"{kind} 获取失败: {exc}")
             return
         prepared = {}
@@ -330,7 +452,7 @@ class Engine:
             if fmt not in prepared:
                 try:
                     prepared[fmt] = (
-                        await asyncio.wait_for(self.prepare(kind, payload, source, text, target), s.timeout_seconds)
+                        await asyncio.wait_for(self._shared_prepare(kind, payload, source, text, target, current()), s.timeout_seconds)
                         if self.prepare is not None else text
                     )
                 except Exception as exc:
@@ -358,9 +480,9 @@ class Engine:
                     self.log(f"{kind} {error}")
                 else:
                     self.store.finish(day, target, kind, "sent")
-        if any(self.store.eligible(day, target, kind) for target in s.targets):
-            self._cooldown(kind, current(), error, format_retry_after)
+        if any(self.store.eligible(day, target, kind) for target in targets):
+            self._cooldown(kind, current(), error, format_retry_after, scope_target)
         else:
-            self.store.save_schedule_state(kind, 0, None)
-            self.next_fetch.pop(kind, None)
-            self.last_error.pop(kind, None)
+            self.store.save_schedule_state(key, 0, None)
+            self.next_fetch.pop(key, None)
+            self.last_error.pop(key, None)

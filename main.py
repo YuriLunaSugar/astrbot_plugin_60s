@@ -74,6 +74,9 @@ class WorkspacePlugin(Star):
         return parts
 
     async def _send(self, target, output):
+        if self.context.get_platform_inst(target.split(":", 1)[0]) is None:
+            logger.warning("目标 UMO 对应的平台实例不存在或尚未加载，未发送；请检查目标会话")
+            return False
         chain = MessageChain()
         chain.chain = self._components(output)
         return await self.context.send_message(target, chain)

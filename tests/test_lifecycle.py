@@ -56,7 +56,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(ValueError):
                     module.WorkspacePlugin(object(), invalid)
                 self.assertEqual(json.loads(Path(directory, 'config.json').read_text()), saved)
-                disabled = module.WorkspacePlugin(object(), {})
+                disabled = module.WorkspacePlugin(object(), SavedConfig())
                 await disabled.initialize()
                 self.assertIsNone(disabled.task)
                 event = types.SimpleNamespace(chain_result=lambda parts: parts, plain_result=lambda text: text)
@@ -76,8 +76,12 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                 parts = disabled._components(Output('来源日期', b'image-data'))
                 self.assertEqual(parts[1][0], 'image')
                 self.assertNotIn('image-data', parts[0][1])
+                unknown_context = types.SimpleNamespace(get_platform_inst=lambda _: None, send_message=AsyncMock())
+                disabled.context = unknown_context
+                self.assertFalse(await disabled._send('unknown:GroupMessage:demo', Output('test')))
+                unknown_context.send_message.assert_not_awaited()
                 await disabled.terminate()
-                active = module.WorkspacePlugin(object(), {'enabled': True, 'targets': ['test:GroupMessage:1']})
+                active = module.WorkspacePlugin(object(), SavedConfig(enabled=True, targets=['test:GroupMessage:1']))
                 await active.initialize()
                 task = active.task
                 await active.initialize()
