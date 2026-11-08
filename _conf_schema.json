@@ -22,7 +22,10 @@
   "targets": {
     "type": "list",
     "default": [],
-    "description": "完整 unified_msg_origin 列表，不是 API URL、适配器名称或裸群号"
+    "description": "定时发送目标列表（完整 UMO）",
+    "_special": "umo",
+    "obvious_hint": true,
+    "hint": "填写例子（全部虚构，必须替换）：example_bot:GroupMessage:demo_group_A；example_bot:FriendMessage:demo_user_B。每项填写一个完整 UMO，不是裸群号或 API URL。点击会话选择器可选择 AstrBot 已记录会话；或从实际消息事件 event.unified_msg_origin 取得完整标识。不要根据示例猜平台实例 ID；在目标格式列表中使用完全相同的 UMO。默认空列表不会发送。"
   },
   "daily_enabled": {
     "type": "bool",
@@ -74,7 +77,9 @@
             "type": "string",
             "default": "",
             "description": "完整目标会话标识",
-            "_special": "umo"
+            "_special": "umo",
+            "obvious_hint": true,
+            "hint": "例：example_bot:GroupMessage:demo_group_A（虚构，勿直接使用）。可点会话选择器复制/选择真实 UMO，须与上方 targets 中同一项完全一致。"
           },
           "daily": {
             "type": "string",
@@ -86,7 +91,8 @@
               "json",
               "markdown",
               "image"
-            ]
+            ],
+            "hint": "例：目标 A 用 image，目标 B 用 markdown；image 发送官方日报图片。留空继承旧日更默认格式，首次使用默认 text。"
           },
           "history": {
             "type": "string",
@@ -97,11 +103,15 @@
               "text",
               "json",
               "markdown"
-            ]
+            ],
+            "hint": "例：目标 A 用 text，目标 B 用 json；历史接口没有官方整图，不支持 image。"
           }
-        }
+        },
+        "hint": "每个真实目标添加一项。虚构例子：example_bot:GroupMessage:demo_group_A，日报选 image，历史选 text。历史接口不支持 image。"
       }
-    }
+    },
+    "obvious_hint": true,
+    "hint": "填写例子：目标 example_bot:GroupMessage:demo_group_A → daily=image、history=text；目标 example_bot:FriendMessage:demo_user_B → daily=markdown、history=json。两项 UMO 都是虚构示例，先在目标列表添加真实会话，再为它添加一项格式配置；此处不会自动添加收件人。"
   },
   "schedules": {
     "type": "object",
